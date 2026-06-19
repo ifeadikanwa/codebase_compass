@@ -8,7 +8,10 @@ version = "0.1.0"
 description = "Tools for exploring and understanding codebases."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "streamlit>=1.36",
+    "watchdog>=4",
+]
 
 [project.optional-dependencies]
 dev = [

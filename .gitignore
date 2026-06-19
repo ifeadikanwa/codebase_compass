@@ -10,3 +10,4 @@ htmlcov/
 .env
 .env.*
 *.egg-info/
+storage/projects/
