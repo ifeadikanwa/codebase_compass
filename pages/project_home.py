@@ -2,11 +2,22 @@ from pathlib import Path
 
 import streamlit as st
 
-from services.llm_service import answer_codebase_question, generate_codebase_overview
+from services.llm_service import (
+    answer_codebase_question,
+    generate_codebase_overview,
+    generate_task_plan,
+)
 from services.retrieval_service import search_codebase
-from services.task_service import add_task_to_project, create_task, get_project_tasks
+from services.task_service import (
+    add_task_to_project,
+    apply_task_plan_to_task,
+    create_task,
+    get_project_tasks,
+    set_subtask_completion,
+)
 from utils.file_reader import read_code_file
 from utils.file_scanner import scan_supported_files
+from utils.markdown_formatter import normalize_generated_markdown
 
 
 LANGUAGE_BY_EXTENSION = {
@@ -141,7 +152,7 @@ def render_codebase_overview(selected_project: dict) -> None:
             )
 
     if overview_key in st.session_state:
-        st.markdown(st.session_state[overview_key])
+        st.markdown(normalize_generated_markdown(st.session_state[overview_key]))
 
 
 def render_codebase_files(selected_project: dict) -> None:
@@ -255,7 +266,6 @@ def render_project_home_section_switcher() -> str:
 
     if selected_section is None:
         selected_section = CODEBASE_SECTION
-        st.session_state[PROJECT_HOME_SECTION_KEY] = CODEBASE_SECTION
 
     st.write(f"Current section: {selected_section}")
 
@@ -268,7 +278,78 @@ def render_codebase_section(selected_project: dict) -> None:
     render_codebase_search(selected_project)
 
 
-def render_task_card(task: dict) -> None:
+def render_task_plan(task: dict) -> None:
+    if "goal" in task:
+        st.subheader("Goal")
+        st.write(task["goal"])
+
+    if task["subtasks"]:
+        st.subheader("Subtasks")
+        completed_subtasks = task.setdefault("completed_subtasks", [])
+        for index, subtask in enumerate(task["subtasks"]):
+            checked_value = st.checkbox(
+                subtask,
+                value=index in completed_subtasks,
+                key=f"subtask_{task['id']}_{index}",
+            )
+            set_subtask_completion(task, index, checked_value)
+
+    if task["acceptance_criteria"]:
+        st.subheader("Acceptance Criteria")
+        for criterion in task["acceptance_criteria"]:
+            st.markdown(f"- {criterion}")
+
+    if task["relevant_files"]:
+        st.subheader("Relevant Files")
+        for file_path in task["relevant_files"]:
+            st.markdown(f"- `{file_path}`")
+
+
+def generate_plan_for_task(selected_project: dict, task: dict) -> None:
+    codebase_path = selected_project.get("codebase_path")
+    if not codebase_path:
+        st.error("This project does not have a valid extracted codebase path.")
+        return
+
+    query = f"{task['title']} {task.get('description', '')}".strip()
+
+    try:
+        retrieved_chunks = search_codebase(codebase_path, query, top_k=5)
+    except RuntimeError as error:
+        st.error(f"Could not search codebase for task planning: {error}")
+        return
+    except ValueError as error:
+        st.error(f"Could not search codebase for task planning: {error}")
+        return
+
+    if not retrieved_chunks:
+        st.warning("No relevant code sections were found for this task.")
+        return
+
+    try:
+        with st.spinner("Generating task plan..."):
+            task_plan = generate_task_plan(
+                selected_project["name"],
+                selected_project.get("description", ""),
+                task["title"],
+                task.get("description", ""),
+                retrieved_chunks,
+            )
+            apply_task_plan_to_task(task, task_plan)
+    except ValueError as error:
+        st.error(f"Could not apply task plan: {error}")
+        return
+    except Exception:
+        st.error(
+            "The task plan could not be generated. Please check your API key or try again."
+        )
+        return
+
+    st.success("Task plan generated.")
+    st.rerun()
+
+
+def render_task_card(selected_project: dict, task: dict) -> None:
     with st.container(border=True):
         st.subheader(task["title"])
 
@@ -280,6 +361,11 @@ def render_task_card(task: dict) -> None:
         st.write(f"Acceptance criteria: {len(task['acceptance_criteria'])}")
         st.write(f"Relevant files: {len(task['relevant_files'])}")
 
+        if st.button("Generate Plan", key=f"generate_plan_{task['id']}"):
+            generate_plan_for_task(selected_project, task)
+
+        render_task_plan(task)
+
 
 @st.dialog("Add Task")
 def render_add_task_dialog(selected_project: dict) -> None:
@@ -290,8 +376,6 @@ def render_add_task_dialog(selected_project: dict) -> None:
 
     if not submitted:
         return
-
-    st.session_state[PROJECT_HOME_SECTION_KEY] = TASKS_SECTION
 
     try:
         task = create_task(task_title, task_description)
@@ -309,7 +393,6 @@ def render_tasks_section(selected_project: dict) -> None:
     st.write("Create and manage development tasks for this project.")
 
     if st.button("Add Task"):
-        st.session_state[PROJECT_HOME_SECTION_KEY] = TASKS_SECTION
         render_add_task_dialog(selected_project)
 
     tasks = get_project_tasks(selected_project)
@@ -319,7 +402,7 @@ def render_tasks_section(selected_project: dict) -> None:
         return
 
     for task in tasks:
-        render_task_card(task)
+        render_task_card(selected_project, task)
 
 
 def main() -> None:

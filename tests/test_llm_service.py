@@ -212,6 +212,17 @@ def test_build_codebase_overview_prompt_includes_grounding_instructions():
     assert "visible files and readme" in prompt_lower
 
 
+def test_build_codebase_overview_prompt_requests_compact_markdown_formatting():
+    prompt = build_codebase_overview_prompt("Compass", "", ["app.py"])
+    prompt_lower = prompt.lower()
+
+    assert "compact markdown" in prompt_lower
+    assert "#### section headings" in prompt_lower
+    assert "do not use #, ##, or ###" in prompt_lower
+    assert "bullet lists" in prompt_lower
+    assert "wrap filenames in backticks" in prompt_lower
+
+
 def test_build_codebase_overview_prompt_preserves_file_order():
     prompt = build_codebase_overview_prompt(
         "Compass",
