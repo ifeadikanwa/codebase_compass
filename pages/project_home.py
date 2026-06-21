@@ -4,6 +4,7 @@ import streamlit as st
 
 from services.llm_service import answer_codebase_question, generate_codebase_overview
 from services.retrieval_service import search_codebase
+from services.task_service import add_task_to_project, create_task, get_project_tasks
 from utils.file_reader import read_code_file
 from utils.file_scanner import scan_supported_files
 
@@ -28,6 +29,10 @@ LANGUAGE_BY_EXTENSION = {
     ".yml": "yaml",
     ".md": "markdown",
 }
+
+PROJECT_HOME_SECTION_KEY = "project_home_section"
+CODEBASE_SECTION = "Codebase"
+TASKS_SECTION = "Tasks"
 
 
 def format_file_size(size_bytes: int) -> str:
@@ -237,6 +242,86 @@ def render_codebase_search(selected_project: dict) -> None:
         render_search_result(result)
 
 
+def render_project_home_section_switcher() -> str:
+    if PROJECT_HOME_SECTION_KEY not in st.session_state:
+        st.session_state[PROJECT_HOME_SECTION_KEY] = CODEBASE_SECTION
+
+    selected_section = st.segmented_control(
+        "Project section",
+        [CODEBASE_SECTION, TASKS_SECTION],
+        key=PROJECT_HOME_SECTION_KEY,
+        label_visibility="collapsed",
+    )
+
+    if selected_section is None:
+        selected_section = CODEBASE_SECTION
+        st.session_state[PROJECT_HOME_SECTION_KEY] = CODEBASE_SECTION
+
+    st.write(f"Current section: {selected_section}")
+
+    return selected_section
+
+
+def render_codebase_section(selected_project: dict) -> None:
+    render_codebase_overview(selected_project)
+    render_codebase_files(selected_project)
+    render_codebase_search(selected_project)
+
+
+def render_task_card(task: dict) -> None:
+    with st.container(border=True):
+        st.subheader(task["title"])
+
+        if task["description"]:
+            st.write(task["description"])
+
+        st.write(f"Human status: {task['human_status']}")
+        st.write(f"Subtasks: {len(task['subtasks'])}")
+        st.write(f"Acceptance criteria: {len(task['acceptance_criteria'])}")
+        st.write(f"Relevant files: {len(task['relevant_files'])}")
+
+
+@st.dialog("Add Task")
+def render_add_task_dialog(selected_project: dict) -> None:
+    with st.form("create_task_form"):
+        task_title = st.text_input("Task Title")
+        task_description = st.text_area("Task Description")
+        submitted = st.form_submit_button("Add Task")
+
+    if not submitted:
+        return
+
+    st.session_state[PROJECT_HOME_SECTION_KEY] = TASKS_SECTION
+
+    try:
+        task = create_task(task_title, task_description)
+        add_task_to_project(selected_project, task)
+    except ValueError as error:
+        st.error(f"Could not add task: {error}")
+        return
+
+    st.success("Task added.")
+    st.rerun()
+
+
+def render_tasks_section(selected_project: dict) -> None:
+    st.header("Tasks")
+    st.write("Create and manage development tasks for this project.")
+
+    if st.button("Add Task"):
+        st.session_state[PROJECT_HOME_SECTION_KEY] = TASKS_SECTION
+        render_add_task_dialog(selected_project)
+
+    tasks = get_project_tasks(selected_project)
+
+    if not tasks:
+        st.info("No tasks have been created for this project yet.")
+        return
+
+    for task in tasks:
+        render_task_card(task)
+
+
 def main() -> None:
     selected_project = get_selected_project()
 
@@ -261,9 +346,12 @@ def main() -> None:
     st.write(f"Uploaded ZIP: {selected_project['zip_filename']}")
     st.write(f"File size: {format_file_size(selected_project['zip_size'])}")
 
-    render_codebase_overview(selected_project)
-    render_codebase_files(selected_project)
-    render_codebase_search(selected_project)
+    active_section = render_project_home_section_switcher()
+
+    if active_section == TASKS_SECTION:
+        render_tasks_section(selected_project)
+    else:
+        render_codebase_section(selected_project)
 
 
 main()
