@@ -7,8 +7,10 @@ from services.llm_service import (
     answer_codebase_question,
     build_codebase_overview_prompt,
     build_codebase_prompt,
+    build_subtask_status_prompt,
     build_task_plan_prompt,
     generate_codebase_overview,
+    generate_subtask_status,
     generate_task_plan,
 )
 
@@ -657,6 +659,488 @@ def test_generate_task_plan_wraps_openai_api_errors(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Could not generate a task plan") as error_info:
         generate_task_plan("Compass", "", "Add login", "", [make_retrieved_chunk()], client=client)
+
+    assert error_info.value.__cause__ is original_error
+
+
+def make_subtask_status_json(
+    status="  done  ",
+    reason="  Login is implemented in the auth service.  ",
+    relevant_files=None,
+):
+    import json
+
+    return json.dumps(
+        {
+            "status": status,
+            "reason": reason,
+            "relevant_files": relevant_files
+            if relevant_files is not None
+            else ["  services/auth_service.py  ", ""],
+        }
+    )
+
+
+def test_build_subtask_status_prompt_includes_project_task_and_subtask_information():
+    prompt = build_subtask_status_prompt(
+        "Compass",
+        "A codebase assistant.",
+        "Add login",
+        "Users can sign in.",
+        "Update auth service",
+        [make_retrieved_chunk()],
+    )
+
+    assert "Compass" in prompt
+    assert "A codebase assistant." in prompt
+    assert "Add login" in prompt
+    assert "Users can sign in." in prompt
+    assert "Update auth service" in prompt
+
+
+def test_build_subtask_status_prompt_includes_source_information():
+    chunk = make_retrieved_chunk(
+        file_path="services/auth_service.py",
+        start_line=12,
+        end_line=30,
+        content="def login_user():\n    return True",
+    )
+
+    prompt = build_subtask_status_prompt(
+        "Compass",
+        "",
+        "Add login",
+        "",
+        "Update auth service",
+        [chunk],
+    )
+
+    assert "File: services/auth_service.py" in prompt
+    assert "Lines: 12-30" in prompt
+    assert "def login_user():" in prompt
+
+
+def test_build_subtask_status_prompt_includes_status_instructions():
+    prompt = build_subtask_status_prompt(
+        "Compass",
+        "",
+        "Add login",
+        "",
+        "Update auth service",
+        [make_retrieved_chunk()],
+    )
+    prompt_lower = prompt.lower()
+
+    assert "using only the supplied code context" in prompt_lower
+    assert "return valid json only" in prompt_lower
+    assert "do not use markdown" in prompt_lower
+    assert "done, partial, missing, unclear" in prompt_lower
+    assert "use unclear" in prompt_lower
+    assert "use missing" in prompt_lower
+    assert "use partial" in prompt_lower
+    assert "use done" in prompt_lower
+
+
+def test_build_subtask_status_prompt_excludes_retrieval_metadata():
+    prompt = build_subtask_status_prompt(
+        "Compass",
+        "",
+        "Add login",
+        "",
+        "Update auth service",
+        [make_retrieved_chunk()],
+    )
+
+    assert "99" not in prompt
+    assert "secret_metadata_value" not in prompt
+    assert "matching_terms" not in prompt
+    assert "score" not in prompt
+
+
+def test_build_subtask_status_prompt_preserves_chunk_order():
+    chunks = [
+        make_retrieved_chunk("first.py", 1, 5, "first_content"),
+        make_retrieved_chunk("second.py", 10, 15, "second_content"),
+    ]
+
+    prompt = build_subtask_status_prompt(
+        "Compass",
+        "",
+        "Add login",
+        "",
+        "Update auth service",
+        chunks,
+    )
+
+    assert prompt.index("SOURCE 1") < prompt.index("SOURCE 2")
+    assert prompt.index("File: first.py") < prompt.index("File: second.py")
+    assert prompt.index("first_content") < prompt.index("second_content")
+
+
+def test_build_subtask_status_prompt_does_not_mutate_retrieved_chunks():
+    chunks = [make_retrieved_chunk()]
+    original_chunks = copy.deepcopy(chunks)
+
+    build_subtask_status_prompt(
+        "Compass",
+        "",
+        "Add login",
+        "",
+        "Update auth service",
+        chunks,
+    )
+
+    assert chunks == original_chunks
+
+
+@pytest.mark.parametrize("project_name", ["", "   "])
+def test_build_subtask_status_prompt_rejects_empty_project_name(project_name):
+    with pytest.raises(ValueError, match="Project name"):
+        build_subtask_status_prompt(
+            project_name,
+            "",
+            "Add login",
+            "",
+            "Update auth service",
+            [make_retrieved_chunk()],
+        )
+
+
+@pytest.mark.parametrize("task_title", ["", "   "])
+def test_build_subtask_status_prompt_rejects_empty_task_title(task_title):
+    with pytest.raises(ValueError, match="Task title"):
+        build_subtask_status_prompt(
+            "Compass",
+            "",
+            task_title,
+            "",
+            "Update auth service",
+            [make_retrieved_chunk()],
+        )
+
+
+@pytest.mark.parametrize("subtask", ["", "   "])
+def test_build_subtask_status_prompt_rejects_empty_subtask(subtask):
+    with pytest.raises(ValueError, match="Subtask"):
+        build_subtask_status_prompt(
+            "Compass",
+            "",
+            "Add login",
+            "",
+            subtask,
+            [make_retrieved_chunk()],
+        )
+
+
+def test_build_subtask_status_prompt_rejects_empty_retrieved_chunks():
+    with pytest.raises(ValueError, match="retrieved code chunk"):
+        build_subtask_status_prompt("Compass", "", "Add login", "", "Update auth service", [])
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "file_path",
+        "start_line",
+        "end_line",
+        "content",
+    ],
+)
+def test_build_subtask_status_prompt_rejects_missing_required_chunk_fields(missing_field):
+    chunk = make_retrieved_chunk()
+    del chunk[missing_field]
+
+    with pytest.raises(ValueError, match=missing_field):
+        build_subtask_status_prompt(
+            "Compass",
+            "",
+            "Add login",
+            "",
+            "Update auth service",
+            [chunk],
+        )
+
+
+def test_generate_subtask_status_calls_responses_api_with_prompt():
+    client = FakeClient(response=FakeResponse(make_subtask_status_json()))
+
+    generate_subtask_status(
+        "Compass",
+        "A codebase assistant.",
+        "Add login",
+        "Users can sign in.",
+        "Update auth service",
+        [make_retrieved_chunk()],
+        client=client,
+        model="test-model",
+    )
+
+    assert len(client.responses.calls) == 1
+    call = client.responses.calls[0]
+    assert call["model"] == "test-model"
+    assert "Compass" in call["input"]
+    assert "Add login" in call["input"]
+    assert "Update auth service" in call["input"]
+    assert "File: services/auth_service.py" in call["input"]
+
+
+def test_generate_subtask_status_returns_cleaned_status_dictionary():
+    client = FakeClient(response=FakeResponse(make_subtask_status_json()))
+
+    status_result = generate_subtask_status(
+        "Compass",
+        "",
+        "Add login",
+        "",
+        "Update auth service",
+        [make_retrieved_chunk()],
+        client=client,
+    )
+
+    assert status_result == {
+        "status": "done",
+        "reason": "Login is implemented in the auth service.",
+        "relevant_files": ["services/auth_service.py"],
+    }
+
+
+@pytest.mark.parametrize("status", ["done", "partial", "missing", "unclear"])
+def test_generate_subtask_status_accepts_allowed_status_values(status):
+    client = FakeClient(response=FakeResponse(make_subtask_status_json(status=status)))
+
+    status_result = generate_subtask_status(
+        "Compass",
+        "",
+        "Add login",
+        "",
+        "Update auth service",
+        [make_retrieved_chunk()],
+        client=client,
+    )
+
+    assert status_result["status"] == status
+
+
+def test_generate_subtask_status_uses_supplied_model():
+    client = FakeClient(response=FakeResponse(make_subtask_status_json()))
+
+    generate_subtask_status(
+        "Compass",
+        "",
+        "Add login",
+        "",
+        "Update auth service",
+        [make_retrieved_chunk()],
+        client=client,
+        model="custom-model",
+    )
+
+    assert client.responses.calls[0]["model"] == "custom-model"
+
+
+def test_generate_subtask_status_uses_openai_model_environment_variable(monkeypatch):
+    monkeypatch.setenv("OPENAI_MODEL", "env-model")
+    client = FakeClient(response=FakeResponse(make_subtask_status_json()))
+
+    generate_subtask_status(
+        "Compass",
+        "",
+        "Add login",
+        "",
+        "Update auth service",
+        [make_retrieved_chunk()],
+        client=client,
+    )
+
+    assert client.responses.calls[0]["model"] == "env-model"
+
+
+def test_generate_subtask_status_uses_fallback_model(monkeypatch):
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    client = FakeClient(response=FakeResponse(make_subtask_status_json()))
+
+    generate_subtask_status(
+        "Compass",
+        "",
+        "Add login",
+        "",
+        "Update auth service",
+        [make_retrieved_chunk()],
+        client=client,
+    )
+
+    assert client.responses.calls[0]["model"] == "gpt-4o-mini"
+
+
+def test_generate_subtask_status_with_injected_client_does_not_require_api_key(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    client = FakeClient(response=FakeResponse(make_subtask_status_json()))
+
+    status_result = generate_subtask_status(
+        "Compass",
+        "",
+        "Add login",
+        "",
+        "Update auth service",
+        [make_retrieved_chunk()],
+        client=client,
+    )
+
+    assert status_result["status"] == "done"
+
+
+@pytest.mark.parametrize("output_text", ["", "   ", None])
+def test_generate_subtask_status_rejects_empty_output(output_text):
+    client = FakeClient(response=FakeResponse(output_text))
+
+    with pytest.raises(RuntimeError, match="empty subtask status"):
+        generate_subtask_status(
+            "Compass",
+            "",
+            "Add login",
+            "",
+            "Update auth service",
+            [make_retrieved_chunk()],
+            client=client,
+        )
+
+
+def test_generate_subtask_status_rejects_invalid_json():
+    client = FakeClient(response=FakeResponse("not json"))
+
+    with pytest.raises(RuntimeError, match="invalid JSON subtask status"):
+        generate_subtask_status(
+            "Compass",
+            "",
+            "Add login",
+            "",
+            "Update auth service",
+            [make_retrieved_chunk()],
+            client=client,
+        )
+
+
+def test_generate_subtask_status_rejects_non_object_json():
+    client = FakeClient(response=FakeResponse("[]"))
+
+    with pytest.raises(RuntimeError, match="not a JSON object"):
+        generate_subtask_status(
+            "Compass",
+            "",
+            "Add login",
+            "",
+            "Update auth service",
+            [make_retrieved_chunk()],
+            client=client,
+        )
+
+
+def test_generate_subtask_status_rejects_missing_required_keys():
+    client = FakeClient(response=FakeResponse('{"status": "done"}'))
+
+    with pytest.raises(RuntimeError, match="missing keys"):
+        generate_subtask_status(
+            "Compass",
+            "",
+            "Add login",
+            "",
+            "Update auth service",
+            [make_retrieved_chunk()],
+            client=client,
+        )
+
+
+@pytest.mark.parametrize(
+    "status_json",
+    [
+        '{"status": 123, "reason": "Done", "relevant_files": []}',
+        '{"status": "done", "reason": 123, "relevant_files": []}',
+        '{"status": "done", "reason": "Done", "relevant_files": "file.py"}',
+        '{"status": "done", "reason": "Done", "relevant_files": [123]}',
+    ],
+)
+def test_generate_subtask_status_rejects_wrong_value_types(status_json):
+    client = FakeClient(response=FakeResponse(status_json))
+
+    with pytest.raises(RuntimeError, match="subtask status"):
+        generate_subtask_status(
+            "Compass",
+            "",
+            "Add login",
+            "",
+            "Update auth service",
+            [make_retrieved_chunk()],
+            client=client,
+        )
+
+
+def test_generate_subtask_status_rejects_invalid_status():
+    client = FakeClient(response=FakeResponse(make_subtask_status_json(status="blocked")))
+
+    with pytest.raises(RuntimeError, match="unsupported subtask status"):
+        generate_subtask_status(
+            "Compass",
+            "",
+            "Add login",
+            "",
+            "Update auth service",
+            [make_retrieved_chunk()],
+            client=client,
+        )
+
+
+def test_generate_subtask_status_rejects_empty_reason():
+    client = FakeClient(response=FakeResponse(make_subtask_status_json(reason="   ")))
+
+    with pytest.raises(RuntimeError, match="empty reason"):
+        generate_subtask_status(
+            "Compass",
+            "",
+            "Add login",
+            "",
+            "Update auth service",
+            [make_retrieved_chunk()],
+            client=client,
+        )
+
+
+def test_generate_subtask_status_does_not_make_real_api_call_without_api_key(monkeypatch):
+    def fail_if_openai_client_is_constructed(*args, **kwargs):
+        raise AssertionError("OpenAI client should not be constructed without an API key.")
+
+    monkeypatch.setattr(llm_service, "OpenAI", fail_if_openai_client_is_constructed)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+
+    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+        generate_subtask_status(
+            "Compass",
+            "",
+            "Add login",
+            "",
+            "Update auth service",
+            [make_retrieved_chunk()],
+        )
+
+
+def test_generate_subtask_status_wraps_openai_api_errors(monkeypatch):
+    class FakeAPIError(Exception):
+        pass
+
+    original_error = FakeAPIError("boom")
+    monkeypatch.setattr(llm_service, "APIError", FakeAPIError)
+    client = FakeClient(error=original_error)
+
+    with pytest.raises(RuntimeError, match="Could not generate a subtask status") as error_info:
+        generate_subtask_status(
+            "Compass",
+            "",
+            "Add login",
+            "",
+            "Update auth service",
+            [make_retrieved_chunk()],
+            client=client,
+        )
 
     assert error_info.value.__cause__ is original_error
 

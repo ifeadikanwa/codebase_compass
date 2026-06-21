@@ -2,6 +2,7 @@ import pytest
 
 from services.task_service import (
     add_task_to_project,
+    apply_ai_status_to_subtask,
     apply_task_plan_to_task,
     create_task,
     get_project_tasks,
@@ -211,3 +212,97 @@ def test_set_subtask_completion_rejects_invalid_subtasks():
 
     with pytest.raises(ValueError, match="list"):
         set_subtask_completion(task, 0, True)
+
+
+def make_ai_status_result():
+    return {
+        "status": "done",
+        "reason": "The code appears to implement this subtask.",
+        "relevant_files": ["app.py"],
+    }
+
+
+def test_apply_ai_status_to_subtask_creates_statuses_and_updates_existing_task():
+    task = make_task_with_subtasks()
+    status_result = make_ai_status_result()
+
+    updated_task = apply_ai_status_to_subtask(task, 1, status_result)
+
+    assert updated_task is task
+    assert task["ai_subtask_statuses"] == {1: status_result}
+
+
+def test_apply_ai_status_to_subtask_preserves_checked_at():
+    task = make_task_with_subtasks()
+    status_result = {
+        **make_ai_status_result(),
+        "checked_at": "2026-06-21T18:42:00+00:00",
+    }
+
+    apply_ai_status_to_subtask(task, 0, status_result)
+
+    assert task["ai_subtask_statuses"][0]["checked_at"] == "2026-06-21T18:42:00+00:00"
+
+
+def test_apply_ai_status_to_subtask_stores_multiple_subtask_statuses():
+    task = make_task_with_subtasks()
+    first_status = make_ai_status_result()
+    second_status = {
+        "status": "missing",
+        "reason": "No matching implementation was found.",
+        "relevant_files": [],
+    }
+
+    apply_ai_status_to_subtask(task, 0, first_status)
+    apply_ai_status_to_subtask(task, 2, second_status)
+
+    assert task["ai_subtask_statuses"] == {
+        0: first_status,
+        2: second_status,
+    }
+
+
+def test_apply_ai_status_to_subtask_does_not_affect_human_status_or_completed_subtasks():
+    task = make_task_with_subtasks()
+    set_subtask_completion(task, 0, True)
+    original_human_status = task["human_status"]
+    original_completed_subtasks = list(task["completed_subtasks"])
+
+    apply_ai_status_to_subtask(task, 1, make_ai_status_result())
+
+    assert task["human_status"] == original_human_status
+    assert task["completed_subtasks"] == original_completed_subtasks
+
+
+@pytest.mark.parametrize("subtask_index", [-1, 3])
+def test_apply_ai_status_to_subtask_rejects_invalid_index(subtask_index):
+    task = make_task_with_subtasks()
+
+    with pytest.raises(ValueError, match="index"):
+        apply_ai_status_to_subtask(task, subtask_index, make_ai_status_result())
+
+
+def test_apply_ai_status_to_subtask_rejects_missing_subtasks():
+    task = create_task("Add login")
+    del task["subtasks"]
+
+    with pytest.raises(ValueError, match="subtasks"):
+        apply_ai_status_to_subtask(task, 0, make_ai_status_result())
+
+
+def test_apply_ai_status_to_subtask_rejects_invalid_subtasks():
+    task = create_task("Add login")
+    task["subtasks"] = "not a list"
+
+    with pytest.raises(ValueError, match="list"):
+        apply_ai_status_to_subtask(task, 0, make_ai_status_result())
+
+
+@pytest.mark.parametrize("missing_field", ["status", "reason", "relevant_files"])
+def test_apply_ai_status_to_subtask_rejects_missing_status_fields(missing_field):
+    task = make_task_with_subtasks()
+    status_result = make_ai_status_result()
+    del status_result[missing_field]
+
+    with pytest.raises(ValueError, match=missing_field):
+        apply_ai_status_to_subtask(task, 0, status_result)

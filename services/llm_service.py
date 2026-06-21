@@ -7,6 +7,8 @@ from openai import APIError, OpenAI
 
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 
+ALLOWED_SUBTASK_STATUS_VALUES = {"done", "partial", "missing", "unclear"}
+
 REQUIRED_RETRIEVED_CHUNK_FIELDS = {
     "file_path",
     "start_line",
@@ -293,6 +295,194 @@ def generate_task_plan(
         raise RuntimeError("OpenAI returned an invalid JSON task plan.") from error
 
     return validate_task_plan(task_plan)
+
+
+def build_subtask_status_prompt(
+    project_name,
+    project_description,
+    task_title,
+    task_description,
+    subtask,
+    retrieved_chunks,
+):
+    cleaned_project_name = project_name.strip()
+    cleaned_project_description = project_description.strip()
+    cleaned_task_title = task_title.strip()
+    cleaned_task_description = task_description.strip()
+    cleaned_subtask = subtask.strip()
+
+    if not cleaned_project_name:
+        raise ValueError("Project name must not be empty.")
+
+    if not cleaned_task_title:
+        raise ValueError("Task title must not be empty.")
+
+    if not cleaned_subtask:
+        raise ValueError("Subtask must not be empty.")
+
+    if not retrieved_chunks:
+        raise ValueError("At least one retrieved code chunk is required.")
+
+    prompt_sections = [
+        "You are Codebase Compass, a project assistant that checks development task progress.",
+        "",
+        "Instructions:",
+        "- Determine whether the subtask appears completed using only the supplied code context.",
+        "- Do not invent files, functions, behavior, or implementation details not present in the context.",
+        "- If the code context is not enough to decide, use unclear.",
+        "- If the implementation is not present, use missing.",
+        "- If some evidence exists but the implementation looks incomplete, use partial.",
+        "- If the subtask appears implemented, use done.",
+        "- Return valid JSON only.",
+        "- Do not use Markdown.",
+        "- Do not wrap the JSON in code fences.",
+        "- The status value must be one of: done, partial, missing, unclear.",
+        "",
+        "Expected JSON structure:",
+        "{",
+        '  "status": "done",',
+        '  "reason": "Short explanation based on the provided code.",',
+        '  "relevant_files": [',
+        '    "path/to/file.py"',
+        "  ]",
+        "}",
+        "",
+        "Project name:",
+        cleaned_project_name,
+        "",
+        "Project description:",
+        cleaned_project_description or "No description provided.",
+        "",
+        "Task title:",
+        cleaned_task_title,
+        "",
+        "Task description:",
+        cleaned_task_description or "No description provided.",
+        "",
+        "Subtask:",
+        cleaned_subtask,
+        "",
+        "Code context:",
+    ]
+
+    for index, chunk in enumerate(retrieved_chunks, start=1):
+        validate_retrieved_chunk(chunk)
+
+        prompt_sections.extend(
+            [
+                "",
+                f"SOURCE {index}",
+                f"File: {chunk['file_path']}",
+                f"Lines: {chunk['start_line']}-{chunk['end_line']}",
+                "",
+                chunk["content"],
+            ]
+        )
+
+    return "\n".join(prompt_sections)
+
+
+def validate_subtask_status_result(status_result):
+    if not isinstance(status_result, dict):
+        raise RuntimeError("OpenAI returned a subtask status that is not a JSON object.")
+
+    required_keys = {
+        "status",
+        "reason",
+        "relevant_files",
+    }
+
+    missing_keys = required_keys - status_result.keys()
+    if missing_keys:
+        missing_key_list = ", ".join(sorted(missing_keys))
+        raise RuntimeError(
+            f"OpenAI returned a subtask status missing keys: {missing_key_list}"
+        )
+
+    status = status_result["status"]
+    if not isinstance(status, str):
+        raise RuntimeError("OpenAI returned a subtask status with an invalid status.")
+
+    cleaned_status = status.strip()
+    if cleaned_status not in ALLOWED_SUBTASK_STATUS_VALUES:
+        raise RuntimeError("OpenAI returned an unsupported subtask status.")
+
+    reason = status_result["reason"]
+    if not isinstance(reason, str):
+        raise RuntimeError("OpenAI returned a subtask status with an invalid reason.")
+
+    cleaned_reason = reason.strip()
+    if not cleaned_reason:
+        raise RuntimeError("OpenAI returned a subtask status with an empty reason.")
+
+    relevant_files = status_result["relevant_files"]
+    if not isinstance(relevant_files, list) or not all(
+        isinstance(file_path, str) for file_path in relevant_files
+    ):
+        raise RuntimeError(
+            "OpenAI returned a subtask status with invalid relevant_files."
+        )
+
+    return {
+        "status": cleaned_status,
+        "reason": cleaned_reason,
+        "relevant_files": [
+            cleaned_file_path
+            for file_path in relevant_files
+            if (cleaned_file_path := file_path.strip())
+        ],
+    }
+
+
+def generate_subtask_status(
+    project_name,
+    project_description,
+    task_title,
+    task_description,
+    subtask,
+    retrieved_chunks,
+    client=None,
+    model=None,
+):
+    prompt = build_subtask_status_prompt(
+        project_name,
+        project_description,
+        task_title,
+        task_description,
+        subtask,
+        retrieved_chunks,
+    )
+
+    load_dotenv()
+
+    selected_model = model or os.getenv("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
+
+    if client is None:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY environment variable must be configured.")
+
+        client = OpenAI(api_key=api_key)
+
+    try:
+        response = client.responses.create(
+            model=selected_model,
+            input=prompt,
+        )
+    except APIError as error:
+        raise RuntimeError("Could not generate a subtask status from OpenAI.") from error
+
+    output_text = getattr(response, "output_text", None)
+
+    if output_text is None or not output_text.strip():
+        raise RuntimeError("OpenAI returned an empty subtask status.")
+
+    try:
+        status_result = json.loads(output_text.strip())
+    except json.JSONDecodeError as error:
+        raise RuntimeError("OpenAI returned an invalid JSON subtask status.") from error
+
+    return validate_subtask_status_result(status_result)
 
 
 def generate_codebase_overview(

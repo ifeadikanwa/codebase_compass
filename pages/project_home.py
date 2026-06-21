@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
 import streamlit as st
@@ -5,11 +6,13 @@ import streamlit as st
 from services.llm_service import (
     answer_codebase_question,
     generate_codebase_overview,
+    generate_subtask_status,
     generate_task_plan,
 )
 from services.retrieval_service import search_codebase
 from services.task_service import (
     add_task_to_project,
+    apply_ai_status_to_subtask,
     apply_task_plan_to_task,
     create_task,
     get_project_tasks,
@@ -18,6 +21,7 @@ from services.task_service import (
 from utils.file_reader import read_code_file
 from utils.file_scanner import scan_supported_files
 from utils.markdown_formatter import normalize_generated_markdown
+from utils.time_formatter import format_relative_time
 
 
 LANGUAGE_BY_EXTENSION = {
@@ -44,6 +48,13 @@ LANGUAGE_BY_EXTENSION = {
 PROJECT_HOME_SECTION_KEY = "project_home_section"
 CODEBASE_SECTION = "Codebase"
 TASKS_SECTION = "Tasks"
+
+AI_STATUS_BADGE_STYLES = {
+    "done": ("✓ Done", "#22C55E"),
+    "partial": ("◐ Partial", "#F59E0B"),
+    "missing": ("✕ Missing", "#EF4444"),
+    "unclear": ("? Unclear", "#94A3B8"),
+}
 
 
 def format_file_size(size_bytes: int) -> str:
@@ -278,7 +289,136 @@ def render_codebase_section(selected_project: dict) -> None:
     render_codebase_search(selected_project)
 
 
-def render_task_plan(task: dict) -> None:
+def render_ai_status_badge(status_result: dict | None, relative_time: str | None = None) -> None:
+    if status_result is None:
+        label = "AI opinion: Not checked"
+        color = "#94A3B8"
+    else:
+        status = status_result["status"]
+        status_label, color = AI_STATUS_BADGE_STYLES.get(
+            status,
+            (status.title(), "#94A3B8"),
+        )
+        label = f"AI opinion: {status_label}"
+
+    time_text = (
+        f"<span style='margin-left:8px; color:#CBD5E1; font-size:0.85rem;'>{relative_time}</span>"
+        if relative_time
+        else ""
+    )
+
+    st.markdown(
+        (
+            f"<span style='display:inline-block; padding:2px 8px; "
+            f"border-radius:999px; background:{color}; color:#0F172A; "
+            f"font-size:0.8rem; font-weight:700;'>{label}</span>"
+            f"{time_text}"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def check_ai_status_for_subtask(
+    selected_project: dict,
+    task: dict,
+    subtask_index: int,
+    subtask: str,
+) -> None:
+    codebase_path = selected_project.get("codebase_path")
+    if not codebase_path:
+        st.error("This project does not have a valid extracted codebase path.")
+        return
+
+    query = f"{task['title']} {task.get('description', '')} {subtask}".strip()
+
+    try:
+        retrieved_chunks = search_codebase(codebase_path, query, top_k=5)
+    except RuntimeError as error:
+        st.error(f"Could not search codebase for AI status: {error}")
+        return
+    except ValueError as error:
+        st.error(f"Could not search codebase for AI status: {error}")
+        return
+
+    checked_at = datetime.now(timezone.utc).isoformat()
+
+    if not retrieved_chunks:
+        status_result = {
+            "status": "unclear",
+            "reason": "No relevant code sections were found for this subtask.",
+            "relevant_files": [],
+            "checked_at": checked_at,
+        }
+    else:
+        try:
+            with st.spinner(""):
+                status_result = generate_subtask_status(
+                    selected_project["name"],
+                    selected_project.get("description", ""),
+                    task["title"],
+                    task.get("description", ""),
+                    subtask,
+                    retrieved_chunks,
+                )
+        except Exception:
+            st.error(
+                "The AI status could not be checked. Please check your API key or try again."
+            )
+            return
+
+        status_result["checked_at"] = checked_at
+
+    try:
+        apply_ai_status_to_subtask(task, subtask_index, status_result)
+    except ValueError as error:
+        st.error(f"Could not apply AI status: {error}")
+        return
+
+    st.rerun()
+
+
+def render_subtask_ai_status(
+    selected_project: dict,
+    task: dict,
+    subtask_index: int,
+    subtask: str,
+) -> None:
+    status_result = task.get("ai_subtask_statuses", {}).get(subtask_index)
+    status_column, refresh_column = st.columns([0.88, 0.12])
+
+    with status_column:
+        relative_time = None
+        if status_result and status_result.get("checked_at"):
+            relative_time = format_relative_time(status_result["checked_at"])
+
+        render_ai_status_badge(status_result, relative_time=relative_time)
+
+    with refresh_column:
+        if st.button(
+            "↻",
+            key=f"refresh_ai_status_{task['id']}_{subtask_index}",
+            help="Refresh AI status for this subtask",
+        ):
+            check_ai_status_for_subtask(
+                selected_project,
+                task,
+                subtask_index,
+                subtask,
+            )
+
+    if status_result:
+        with st.expander("AI details", expanded=False):
+            st.write(f"Reason: {status_result['reason']}")
+
+            if status_result["relevant_files"]:
+                st.write("Relevant files:")
+                for file_path in status_result["relevant_files"]:
+                    st.markdown(f"- `{file_path}`")
+            else:
+                st.write("Relevant files: None")
+
+
+def render_task_plan(selected_project: dict, task: dict) -> None:
     if "goal" in task:
         st.subheader("Goal")
         st.write(task["goal"])
@@ -293,6 +433,10 @@ def render_task_plan(task: dict) -> None:
                 key=f"subtask_{task['id']}_{index}",
             )
             set_subtask_completion(task, index, checked_value)
+
+            _, ai_column = st.columns([0.04, 0.96])
+            with ai_column:
+                render_subtask_ai_status(selected_project, task, index, subtask)
 
     if task["acceptance_criteria"]:
         st.subheader("Acceptance Criteria")
@@ -364,7 +508,7 @@ def render_task_card(selected_project: dict, task: dict) -> None:
         if st.button("Generate Plan", key=f"generate_plan_{task['id']}"):
             generate_plan_for_task(selected_project, task)
 
-        render_task_plan(task)
+        render_task_plan(selected_project, task)
 
 
 @st.dialog("Add Task")

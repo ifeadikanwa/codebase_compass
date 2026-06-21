@@ -92,3 +92,24 @@ def set_subtask_completion(task, subtask_index, is_complete):
         task["human_status"] = "in_progress"
 
     return task
+
+
+def apply_ai_status_to_subtask(task, subtask_index, status_result):
+    if "subtasks" not in task:
+        raise ValueError("Task is missing subtasks.")
+
+    if not isinstance(task["subtasks"], list):
+        raise ValueError("Task subtasks must be a list.")
+
+    if subtask_index < 0 or subtask_index >= len(task["subtasks"]):
+        raise ValueError("Subtask index is invalid.")
+
+    required_fields = ["status", "reason", "relevant_files"]
+    for field in required_fields:
+        if field not in status_result:
+            raise ValueError(f"AI status result is missing required field: {field}")
+
+    ai_subtask_statuses = task.setdefault("ai_subtask_statuses", {})
+    ai_subtask_statuses[subtask_index] = status_result
+
+    return task
