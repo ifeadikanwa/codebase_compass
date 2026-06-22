@@ -1,4 +1,5 @@
 import re
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -64,3 +65,43 @@ def extract_project_zip(saved_zip_path: str) -> str:
         raise RuntimeError(f"Could not extract uploaded ZIP file: {error}") from error
 
     return str(extraction_folder)
+
+
+def get_project_storage_folder(project: dict) -> Path | None:
+    if project.get("zip_path"):
+        return Path(project["zip_path"]).parent
+
+    if project.get("codebase_path"):
+        codebase_path = Path(project["codebase_path"])
+        if codebase_path.name == "codebase":
+            return codebase_path.parent
+        return codebase_path
+
+    return None
+
+
+def is_safe_project_storage_folder(project_folder: Path | None) -> bool:
+    if project_folder is None:
+        return False
+
+    resolved_folder = project_folder.resolve()
+    resolved_projects_dir = PROJECTS_STORAGE_DIR.resolve()
+    resolved_storage_dir = resolved_projects_dir.parent
+
+    if resolved_folder in {resolved_folder.parent, resolved_storage_dir, resolved_projects_dir}:
+        return False
+
+    return resolved_projects_dir in resolved_folder.parents
+
+
+def delete_project_storage(project: dict) -> bool:
+    project_folder = get_project_storage_folder(project)
+
+    if not is_safe_project_storage_folder(project_folder):
+        return False
+
+    if not project_folder.exists():
+        return False
+
+    shutil.rmtree(project_folder)
+    return True

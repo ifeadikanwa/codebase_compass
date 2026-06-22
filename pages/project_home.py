@@ -3,6 +3,18 @@ from pathlib import Path
 
 import streamlit as st
 
+from data.project_ai_output_repository import (
+    CODEBASE_OVERVIEW_OUTPUT_TYPE,
+    get_project_ai_output,
+    save_project_ai_output,
+)
+from data.project_repository import get_project_record_by_id, get_project_record_by_name
+from data.task_repository import (
+    create_task_record,
+    delete_task_record,
+    list_task_records_for_project,
+    update_task_record,
+)
 from services.llm_service import (
     answer_codebase_question,
     generate_codebase_overview,
@@ -11,11 +23,9 @@ from services.llm_service import (
 )
 from services.retrieval_service import search_codebase
 from services.task_service import (
-    add_task_to_project,
     apply_ai_status_to_subtask,
     apply_task_plan_to_task,
     create_task,
-    get_project_tasks,
     set_subtask_completion,
 )
 from utils.file_reader import read_code_file
@@ -70,20 +80,30 @@ def format_file_size(size_bytes: int) -> str:
 
 
 def get_selected_project() -> dict | None:
+    selected_project_id = st.session_state.get("selected_project_id")
     selected_project_name = st.session_state.get("selected_project_name")
-    projects = st.session_state.get("projects", [])
 
-    if not selected_project_name:
+    try:
+        if selected_project_id:
+            project = get_project_record_by_id(selected_project_id)
+            if project is not None:
+                st.session_state["selected_project_name"] = project["name"]
+                return project
+
+        if selected_project_name:
+            project = get_project_record_by_name(selected_project_name)
+            if project is not None:
+                st.session_state["selected_project_id"] = project["id"]
+                return project
+    except Exception:
+        st.error("The selected project could not be loaded. Please return to My Projects.")
         return None
-
-    for project in projects:
-        if project["name"] == selected_project_name:
-            return project
 
     return None
 
 
 def return_to_projects() -> None:
+    st.session_state.pop("selected_project_id", None)
     st.session_state.pop("selected_project_name", None)
     st.switch_page("pages/projects.py")
 
@@ -119,6 +139,32 @@ def find_readme_file(file_paths: list[str]) -> str | None:
     return None
 
 
+def parse_iso_timestamp(timestamp: str | None):
+    if not timestamp:
+        return None
+
+    try:
+        normalized_timestamp = timestamp.replace("Z", "+00:00")
+        parsed_timestamp = datetime.fromisoformat(normalized_timestamp)
+    except ValueError:
+        return None
+
+    if parsed_timestamp.tzinfo is None:
+        parsed_timestamp = parsed_timestamp.replace(tzinfo=timezone.utc)
+
+    return parsed_timestamp
+
+
+def is_overview_stale(selected_project: dict, saved_overview: dict) -> bool:
+    project_updated_at = parse_iso_timestamp(selected_project.get("updated_at"))
+    overview_updated_at = parse_iso_timestamp(saved_overview.get("updated_at"))
+
+    if project_updated_at is None or overview_updated_at is None:
+        return False
+
+    return project_updated_at > overview_updated_at
+
+
 def render_codebase_overview(selected_project: dict) -> None:
     st.header("Codebase Overview")
     st.write(
@@ -126,11 +172,19 @@ def render_codebase_overview(selected_project: dict) -> None:
     )
 
     codebase_path = selected_project.get("codebase_path")
-    overview_key = f"overview_{selected_project['name']}"
 
     if not codebase_path:
         st.error("This project does not have a valid extracted codebase path.")
         return
+
+    try:
+        saved_overview = get_project_ai_output(
+            selected_project["id"],
+            CODEBASE_OVERVIEW_OUTPUT_TYPE,
+        )
+    except Exception:
+        st.error("The saved codebase overview could not be loaded.")
+        saved_overview = None
 
     try:
         supported_files = scan_supported_files(codebase_path)
@@ -139,10 +193,25 @@ def render_codebase_overview(selected_project: dict) -> None:
         return
 
     if not supported_files:
-        st.info("No supported source-code or text files were found in this project.")
+        st.info(
+            "No supported code files found.\n\n"
+            "Make sure your ZIP contains files like .py, .js, .ts, .java, "
+            ".md, .json, .sql, or other supported text/code files."
+        )
         return
 
-    if st.button("Generate Overview"):
+    overview_button_label = "Regenerate Overview" if saved_overview else "Generate Overview"
+
+    if saved_overview:
+        st.write(f"Generated {format_relative_time(saved_overview.get('updated_at'))}")
+
+        if is_overview_stale(selected_project, saved_overview):
+            st.warning(
+                "This overview may be outdated because the project name or description "
+                "was updated after it was generated. Regenerate the overview to refresh it."
+            )
+
+    if st.button(overview_button_label):
         readme_content = None
         readme_file_path = find_readme_file(supported_files)
 
@@ -151,7 +220,7 @@ def render_codebase_overview(selected_project: dict) -> None:
                 readme_content = read_code_file(codebase_path, readme_file_path)
 
             with st.spinner("Generating codebase overview..."):
-                st.session_state[overview_key] = generate_codebase_overview(
+                generated_overview = generate_codebase_overview(
                     selected_project["name"],
                     selected_project.get("description", ""),
                     supported_files,
@@ -161,9 +230,28 @@ def render_codebase_overview(selected_project: dict) -> None:
             st.error(
                 "The codebase overview could not be generated. Please check your API key or try again."
             )
+            return
 
-    if overview_key in st.session_state:
-        st.markdown(normalize_generated_markdown(st.session_state[overview_key]))
+        try:
+            save_project_ai_output(
+                selected_project["id"],
+                CODEBASE_OVERVIEW_OUTPUT_TYPE,
+                generated_overview,
+            )
+        except Exception:
+            st.error("The codebase overview was generated but could not be saved. Please try again.")
+            return
+
+        st.rerun()
+
+    if saved_overview:
+        st.markdown(normalize_generated_markdown(saved_overview["content"]))
+    else:
+        st.info(
+            "No overview generated yet.\n\n"
+            "Generate an overview to summarize the project structure, important files, "
+            "and how the codebase fits together."
+        )
 
 
 def render_codebase_files(selected_project: dict) -> None:
@@ -182,7 +270,11 @@ def render_codebase_files(selected_project: dict) -> None:
         return
 
     if not supported_files:
-        st.info("No supported source-code or text files were found in this project.")
+        st.info(
+            "No supported code files found.\n\n"
+            "Make sure your ZIP contains files like .py, .js, .ts, .java, "
+            ".md, .json, .sql, or other supported text/code files."
+        )
         return
 
     st.write(f"{len(supported_files)} supported files found")
@@ -209,6 +301,10 @@ def render_search_result(result: dict) -> None:
 def render_codebase_search(selected_project: dict) -> None:
     st.header("Search Codebase")
     st.write("Search for relevant code sections using keywords.")
+    st.caption(
+        "Ask about project structure, files, functions, or where a feature should be added. "
+        "Examples: Where is the cart logic? How does checkout work? Which files are relevant for adding login?"
+    )
 
     codebase_path = selected_project.get("codebase_path")
 
@@ -242,7 +338,10 @@ def render_codebase_search(selected_project: dict) -> None:
         return
 
     if not results:
-        st.info("No matching code sections were found.")
+        st.info(
+            "No relevant code sections found.\n\n"
+            "Try using a filename, function name, class name, or more specific feature description."
+        )
         return
 
     st.subheader("AI Answer")
@@ -287,6 +386,128 @@ def render_codebase_section(selected_project: dict) -> None:
     render_codebase_overview(selected_project)
     render_codebase_files(selected_project)
     render_codebase_search(selected_project)
+
+
+def save_task_update(task: dict, success_message: str | None = None) -> bool:
+    try:
+        updated_task = update_task_record(task)
+    except ValueError as error:
+        st.error(f"Could not save task: {error}")
+        return False
+    except Exception:
+        st.error("Task changes could not be saved. Please try again.")
+        return False
+
+    if updated_task is None:
+        st.error("Task changes could not be saved because the task no longer exists.")
+        return False
+
+    if success_message:
+        st.success(success_message)
+
+    return True
+
+
+def clear_pending_task_delete() -> None:
+    st.session_state.pop("pending_delete_task_id", None)
+
+
+def clear_task_editing() -> None:
+    st.session_state.pop("editing_task_id", None)
+
+
+def task_has_generated_content(task: dict) -> bool:
+    return any(
+        [
+            task.get("goal"),
+            task.get("subtasks"),
+            task.get("acceptance_criteria"),
+            task.get("relevant_files"),
+            task.get("ai_subtask_statuses"),
+        ]
+    )
+
+
+def reset_generated_task_fields(task: dict) -> dict:
+    task["human_status"] = "not_started"
+    task["goal"] = ""
+    task["subtasks"] = []
+    task["completed_subtasks"] = []
+    task["acceptance_criteria"] = []
+    task["relevant_files"] = []
+    task["ai_subtask_statuses"] = {}
+    return task
+
+
+def delete_task(task: dict) -> None:
+    try:
+        deleted = delete_task_record(task["id"])
+    except ValueError as error:
+        st.error(f"Could not delete task: {error}")
+        return
+    except Exception:
+        st.error("Task could not be deleted. Please try again.")
+        return
+
+    clear_pending_task_delete()
+
+    if deleted:
+        st.success("Task deleted.")
+    else:
+        st.warning("This task was already deleted.")
+
+    st.rerun()
+
+
+def render_task_edit_form(task: dict) -> None:
+    st.write("Editing task")
+
+    if task_has_generated_content(task):
+        st.warning(
+            "Changing the title or description will clear the generated plan, "
+            "checkbox progress, and AI status for this task."
+        )
+
+    with st.form(f"edit_task_form_{task['id']}"):
+        edited_title = st.text_input("Task Title", value=task["title"])
+        edited_description = st.text_area(
+            "Task Description",
+            value=task.get("description", ""),
+        )
+        save_submitted = st.form_submit_button("Save Changes")
+        cancel_submitted = st.form_submit_button("Cancel")
+
+    if cancel_submitted:
+        clear_task_editing()
+        st.rerun()
+
+    if not save_submitted:
+        return
+
+    cleaned_title = edited_title.strip()
+    cleaned_description = edited_description.strip()
+
+    if not cleaned_title:
+        st.error("Task title is required.")
+        return
+
+    if cleaned_title == task["title"] and cleaned_description == task.get("description", ""):
+        clear_task_editing()
+        st.info("No task changes were made.")
+        st.rerun()
+
+    updated_task = {
+        **task,
+        "title": cleaned_title,
+        "description": cleaned_description,
+    }
+    reset_generated_task_fields(updated_task)
+
+    if not save_task_update(updated_task, success_message="Task updated."):
+        return
+
+    clear_task_editing()
+    st.rerun()
 
 
 def render_ai_status_badge(status_result: dict | None, relative_time: str | None = None) -> None:
@@ -374,6 +595,9 @@ def check_ai_status_for_subtask(
         st.error(f"Could not apply AI status: {error}")
         return
 
+    if not save_task_update(task):
+        return
+
     st.rerun()
 
 
@@ -425,6 +649,10 @@ def render_task_plan(selected_project: dict, task: dict) -> None:
 
     if task["subtasks"]:
         st.subheader("Subtasks")
+        st.caption(
+            "AI status checks each subtask against the current codebase. "
+            "Refresh only the subtasks you want to re-check."
+        )
         completed_subtasks = task.setdefault("completed_subtasks", [])
         for index, subtask in enumerate(task["subtasks"]):
             checked_value = st.checkbox(
@@ -432,7 +660,15 @@ def render_task_plan(selected_project: dict, task: dict) -> None:
                 value=index in completed_subtasks,
                 key=f"subtask_{task['id']}_{index}",
             )
+            previous_completed_subtasks = list(completed_subtasks)
+            previous_human_status = task["human_status"]
             set_subtask_completion(task, index, checked_value)
+
+            if (
+                task["completed_subtasks"] != previous_completed_subtasks
+                or task["human_status"] != previous_human_status
+            ):
+                save_task_update(task)
 
             _, ai_column = st.columns([0.04, 0.96])
             with ai_column:
@@ -489,13 +725,33 @@ def generate_plan_for_task(selected_project: dict, task: dict) -> None:
         )
         return
 
-    st.success("Task plan generated.")
+    if not save_task_update(task, success_message="Task plan generated."):
+        return
+
     st.rerun()
 
 
 def render_task_card(selected_project: dict, task: dict) -> None:
     with st.container(border=True):
         st.subheader(task["title"])
+
+        action_columns = st.columns([0.12, 0.12, 0.76])
+
+        with action_columns[0]:
+            if st.button("Edit", key=f"edit_task_{task['id']}"):
+                st.session_state["editing_task_id"] = task["id"]
+                clear_pending_task_delete()
+                st.rerun()
+
+        with action_columns[1]:
+            if st.button("Delete", key=f"delete_task_{task['id']}"):
+                st.session_state["pending_delete_task_id"] = task["id"]
+                clear_task_editing()
+                st.rerun()
+
+        if st.session_state.get("editing_task_id") == task["id"]:
+            render_task_edit_form(task)
+            return
 
         if task["description"]:
             st.write(task["description"])
@@ -505,6 +761,26 @@ def render_task_card(selected_project: dict, task: dict) -> None:
         st.write(f"Acceptance criteria: {len(task['acceptance_criteria'])}")
         st.write(f"Relevant files: {len(task['relevant_files'])}")
 
+        if st.session_state.get("pending_delete_task_id") == task["id"]:
+            st.warning("Delete this task? This cannot be undone.")
+            confirm_column, cancel_column = st.columns(2)
+
+            with confirm_column:
+                if st.button(
+                    "Confirm delete",
+                    key=f"confirm_delete_task_{task['id']}",
+                ):
+                    delete_task(task)
+
+            with cancel_column:
+                if st.button("Cancel", key=f"cancel_delete_task_{task['id']}"):
+                    clear_pending_task_delete()
+                    st.rerun()
+
+        st.caption(
+            "Generate Plan uses the current codebase to suggest a goal, subtasks, "
+            "acceptance criteria, and relevant files."
+        )
         if st.button("Generate Plan", key=f"generate_plan_{task['id']}"):
             generate_plan_for_task(selected_project, task)
 
@@ -523,9 +799,12 @@ def render_add_task_dialog(selected_project: dict) -> None:
 
     try:
         task = create_task(task_title, task_description)
-        add_task_to_project(selected_project, task)
+        create_task_record(selected_project["id"], task)
     except ValueError as error:
         st.error(f"Could not add task: {error}")
+        return
+    except Exception:
+        st.error("Task could not be saved. Please try again.")
         return
 
     st.success("Task added.")
@@ -539,10 +818,18 @@ def render_tasks_section(selected_project: dict) -> None:
     if st.button("Add Task"):
         render_add_task_dialog(selected_project)
 
-    tasks = get_project_tasks(selected_project)
+    try:
+        tasks = list_task_records_for_project(selected_project["id"])
+    except Exception:
+        st.error("Tasks could not be loaded. Please try again.")
+        return
 
     if not tasks:
-        st.info("No tasks have been created for this project yet.")
+        st.info(
+            "No tasks yet.\n\n"
+            "Add a task you want to complete in this codebase. Codebase Compass can "
+            "turn it into subtasks, acceptance criteria, and relevant files."
+        )
         return
 
     for task in tasks:
@@ -570,8 +857,9 @@ def main() -> None:
     else:
         st.write("No description provided.")
 
-    st.write(f"Uploaded ZIP: {selected_project['zip_filename']}")
-    st.write(f"File size: {format_file_size(selected_project['zip_size'])}")
+    st.write(f"Uploaded ZIP: {selected_project['original_zip_filename']}")
+    st.write(f"File size: {format_file_size(selected_project['zip_file_size'])}")
+    st.write(f"Codebase path: {selected_project['codebase_path']}")
 
     active_section = render_project_home_section_switcher()
 
