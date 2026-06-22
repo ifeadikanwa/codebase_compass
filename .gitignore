@@ -12,3 +12,4 @@ htmlcov/
 *.egg-info/
 storage/projects/
 .vscode
+storage/
