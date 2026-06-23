@@ -1,3 +1,4 @@
+import html
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -97,6 +98,92 @@ def render_workspace_heading(heading: str) -> None:
     )
 
 
+def render_muted_helper_text(text: str) -> None:
+    st.markdown(
+        f"<p style='color: #A0A7B4; font-style: italic; margin-top: -0.25rem;'>{text}</p>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_section_heading(title: str, help_text: str | None = None) -> None:
+    safe_title = html.escape(title)
+
+    if not help_text:
+        st.markdown(f"### {safe_title}", unsafe_allow_html=True)
+        return
+
+    safe_help_text = html.escape(help_text)
+
+    st.markdown(
+        f"""
+        <style>
+        summary::-webkit-details-marker {{
+            display: none;
+        }}
+
+        summary::marker {{
+            display: none;
+        }}
+        </style>
+        <div style="
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            margin-top: 0.75rem;
+            margin-bottom: 0.75rem;
+            position: relative;
+        ">
+            <h3 style="
+                margin: 0;
+                padding: 0;
+                line-height: 1.2;
+            ">
+                {safe_title}
+            </h3>
+            <details style="
+                position: relative;
+                display: inline-flex;
+                align-items: center;
+                margin: 0;
+                padding: 0;
+            ">
+                <summary style="
+                    list-style: none;
+                    cursor: pointer;
+                    color: #A0A7B4;
+                    font-size: 0.9rem;
+                    line-height: 1;
+                    display: inline-flex;
+                    align-items: center;
+                    transform: translateY(1px);
+                ">
+                    ⓘ
+                </summary>
+                <div style="
+                    position: absolute;
+                    top: 1.5rem;
+                    left: 0;
+                    z-index: 100;
+                    min-width: 260px;
+                    max-width: 360px;
+                    padding: 0.75rem;
+                    border: 1px solid #374151;
+                    border-radius: 0.5rem;
+                    background: #111827;
+                    color: #D1D5DB;
+                    font-size: 0.9rem;
+                    line-height: 1.4;
+                    box-shadow: 0 10px 25px rgba(0,0,0,0.35);
+                ">
+                    {safe_help_text}
+                </div>
+            </details>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def get_selected_project() -> dict | None:
     selected_project_id = st.session_state.get("selected_project_id")
     selected_project_name = st.session_state.get("selected_project_name")
@@ -184,9 +271,9 @@ def is_overview_stale(selected_project: dict, saved_overview: dict) -> bool:
 
 
 def render_codebase_overview(selected_project: dict) -> None:
-    st.subheader("Codebase Overview")
-    st.write(
-        "Generate a high-level summary of this project from the visible files and README."
+    render_section_heading(
+        "Codebase Overview",
+        "Generate a high-level summary of this project from the visible files and README.",
     )
 
     codebase_path = selected_project.get("codebase_path")
@@ -273,7 +360,7 @@ def render_codebase_overview(selected_project: dict) -> None:
 
 
 def render_codebase_files(selected_project: dict) -> None:
-    st.subheader("Codebase Files")
+    render_section_heading("Codebase Files", "Browse supported files from the uploaded codebase.")
 
     codebase_path = selected_project.get("codebase_path")
 
@@ -317,12 +404,11 @@ def render_search_result(result: dict) -> None:
 
 
 def render_codebase_search(selected_project: dict) -> None:
-    st.subheader("Ask Codebase")
-    st.write("Search for relevant code sections using keywords.")
-    st.caption(
+    ask_help_text = (
         "Ask about project structure, files, functions, or where a feature should be added. "
         "Examples: Where is the cart logic? How does checkout work? Which files are relevant for adding login?"
     )
+    render_section_heading("Ask Codebase", ask_help_text)
 
     codebase_path = selected_project.get("codebase_path")
 
@@ -334,6 +420,7 @@ def render_codebase_search(selected_project: dict) -> None:
         query = st.text_input(
             "Search query",
             placeholder="Where is user login handled?",
+            help=ask_help_text,
         )
         submitted = st.form_submit_button("Search")
 
@@ -382,12 +469,13 @@ def render_codebase_search(selected_project: dict) -> None:
 
 
 def render_codebase_explain_section() -> None:
-    st.subheader("File Explanations")
-    st.info(
-        "File explanations will appear here.\n\n"
-        "Next, this section will let you select a file, generate explanations for its "
-        "classes, functions, variables, and important sections, then view those "
-        "explanations in expandable cards."
+    render_section_heading(
+        "File Explanations",
+        "This upcoming section will explain classes, functions, variables, and important code sections.",
+    )
+    render_muted_helper_text(
+        "File explanations will appear here. Next, this section will let you generate "
+        "explanations for classes, functions, variables, and important sections."
     )
 
 
@@ -676,7 +764,10 @@ def render_subtask_ai_status(
         if st.button(
             "↻",
             key=f"refresh_ai_status_{task['id']}_{subtask_index}",
-            help="Refresh AI status for this subtask",
+            help=(
+                "Refresh AI status checks this subtask against the current codebase. "
+                "Refresh only the subtasks you want to re-check."
+            ),
         ):
             check_ai_status_for_subtask(
                 selected_project,
@@ -704,10 +795,6 @@ def render_task_plan(selected_project: dict, task: dict) -> None:
 
     if task["subtasks"]:
         st.subheader("Subtasks")
-        st.caption(
-            "AI status checks each subtask against the current codebase. "
-            "Refresh only the subtasks you want to re-check."
-        )
         completed_subtasks = task.setdefault("completed_subtasks", [])
         for index, subtask in enumerate(task["subtasks"]):
             checked_value = st.checkbox(
@@ -832,11 +919,14 @@ def render_task_card(selected_project: dict, task: dict) -> None:
                     clear_pending_task_delete()
                     st.rerun()
 
-        st.caption(
-            "Generate Plan uses the current codebase to suggest a goal, subtasks, "
-            "acceptance criteria, and relevant files."
-        )
-        if st.button("Generate Plan", key=f"generate_plan_{task['id']}"):
+        if st.button(
+            "Generate Plan",
+            key=f"generate_plan_{task['id']}",
+            help=(
+                "Generate Plan uses the current codebase to suggest a goal, subtasks, "
+                "acceptance criteria, and relevant files."
+            ),
+        ):
             generate_plan_for_task(selected_project, task)
 
         render_task_plan(selected_project, task)
@@ -869,7 +959,7 @@ def render_add_task_dialog(selected_project: dict) -> None:
 def render_tasks_section(selected_project: dict) -> None:
     render_workspace_heading("Task Workspace")
     st.subheader("Tasks")
-    st.write("Create and manage development tasks for this project.")
+    render_muted_helper_text("Create and manage development tasks for this project.")
 
     if st.button("Add Task"):
         render_add_task_dialog(selected_project)
