@@ -58,6 +58,17 @@ LANGUAGE_BY_EXTENSION = {
 PROJECT_HOME_SECTION_KEY = "project_home_section"
 CODEBASE_SECTION = "Codebase"
 TASKS_SECTION = "Tasks"
+CODEBASE_SUBSECTION_KEY = "codebase_subsection"
+CODEBASE_OVERVIEW_SUBSECTION = "Overview"
+CODEBASE_FILES_SUBSECTION = "Files"
+CODEBASE_ASK_SUBSECTION = "Ask"
+CODEBASE_EXPLAIN_SUBSECTION = "Explain"
+CODEBASE_SUBSECTIONS = [
+    CODEBASE_OVERVIEW_SUBSECTION,
+    CODEBASE_FILES_SUBSECTION,
+    CODEBASE_ASK_SUBSECTION,
+    CODEBASE_EXPLAIN_SUBSECTION,
+]
 
 AI_STATUS_BADGE_STYLES = {
     "done": ("✓ Done", "#22C55E"),
@@ -363,6 +374,16 @@ def render_codebase_search(selected_project: dict) -> None:
         render_search_result(result)
 
 
+def render_codebase_explain_section() -> None:
+    st.header("File Explanations")
+    st.info(
+        "File explanations will appear here.\n\n"
+        "Next, this section will let you select a file, generate explanations for its "
+        "classes, functions, variables, and important sections, then view those "
+        "explanations in expandable cards."
+    )
+
+
 def render_project_home_section_switcher() -> str:
     if PROJECT_HOME_SECTION_KEY not in st.session_state:
         st.session_state[PROJECT_HOME_SECTION_KEY] = CODEBASE_SECTION
@@ -377,15 +398,42 @@ def render_project_home_section_switcher() -> str:
     if selected_section is None:
         selected_section = CODEBASE_SECTION
 
-    st.write(f"Current section: {selected_section}")
-
     return selected_section
 
 
+def render_codebase_subsection_switcher() -> str:
+    if CODEBASE_SUBSECTION_KEY not in st.session_state:
+        st.session_state[CODEBASE_SUBSECTION_KEY] = CODEBASE_OVERVIEW_SUBSECTION
+
+    if st.session_state[CODEBASE_SUBSECTION_KEY] not in CODEBASE_SUBSECTIONS:
+        st.session_state[CODEBASE_SUBSECTION_KEY] = CODEBASE_OVERVIEW_SUBSECTION
+
+    selected_subsection = st.segmented_control(
+        "Codebase tool",
+        CODEBASE_SUBSECTIONS,
+        key=CODEBASE_SUBSECTION_KEY,
+        label_visibility="collapsed",
+    )
+
+    if selected_subsection is None:
+        selected_subsection = CODEBASE_OVERVIEW_SUBSECTION
+
+    return selected_subsection
+
+
 def render_codebase_section(selected_project: dict) -> None:
-    render_codebase_overview(selected_project)
-    render_codebase_files(selected_project)
-    render_codebase_search(selected_project)
+    st.header("Codebase Workspace")
+
+    active_subsection = render_codebase_subsection_switcher()
+
+    if active_subsection == CODEBASE_FILES_SUBSECTION:
+        render_codebase_files(selected_project)
+    elif active_subsection == CODEBASE_ASK_SUBSECTION:
+        render_codebase_search(selected_project)
+    elif active_subsection == CODEBASE_EXPLAIN_SUBSECTION:
+        render_codebase_explain_section()
+    else:
+        render_codebase_overview(selected_project)
 
 
 def save_task_update(task: dict, success_message: str | None = None) -> bool:
@@ -812,7 +860,7 @@ def render_add_task_dialog(selected_project: dict) -> None:
 
 
 def render_tasks_section(selected_project: dict) -> None:
-    st.header("Tasks")
+    st.header("Task Workspace")
     st.write("Create and manage development tasks for this project.")
 
     if st.button("Add Task"):
@@ -864,9 +912,11 @@ def main() -> None:
     active_section = render_project_home_section_switcher()
 
     if active_section == TASKS_SECTION:
-        render_tasks_section(selected_project)
+        with st.container(border=True):
+            render_tasks_section(selected_project)
     else:
-        render_codebase_section(selected_project)
+        with st.container(border=True):
+            render_codebase_section(selected_project)
 
 
 main()

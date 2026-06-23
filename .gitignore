@@ -9,6 +9,7 @@ htmlcov/
 .DS_Store
 .env
 .env.*
+!.env.example
 *.egg-info/
 storage/projects/
 .vscode
