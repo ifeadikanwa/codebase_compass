@@ -90,6 +90,13 @@ def format_file_size(size_bytes: int) -> str:
     return f"{size_mb:.1f} MB"
 
 
+def render_workspace_heading(heading: str) -> None:
+    st.markdown(
+        f"<h2 style='color: #4DA3FF; margin-bottom: 0.75rem;'>{heading}</h2>",
+        unsafe_allow_html=True,
+    )
+
+
 def get_selected_project() -> dict | None:
     selected_project_id = st.session_state.get("selected_project_id")
     selected_project_name = st.session_state.get("selected_project_name")
@@ -177,7 +184,7 @@ def is_overview_stale(selected_project: dict, saved_overview: dict) -> bool:
 
 
 def render_codebase_overview(selected_project: dict) -> None:
-    st.header("Codebase Overview")
+    st.subheader("Codebase Overview")
     st.write(
         "Generate a high-level summary of this project from the visible files and README."
     )
@@ -266,7 +273,7 @@ def render_codebase_overview(selected_project: dict) -> None:
 
 
 def render_codebase_files(selected_project: dict) -> None:
-    st.header("Codebase Files")
+    st.subheader("Codebase Files")
 
     codebase_path = selected_project.get("codebase_path")
 
@@ -310,7 +317,7 @@ def render_search_result(result: dict) -> None:
 
 
 def render_codebase_search(selected_project: dict) -> None:
-    st.header("Search Codebase")
+    st.subheader("Ask Codebase")
     st.write("Search for relevant code sections using keywords.")
     st.caption(
         "Ask about project structure, files, functions, or where a feature should be added. "
@@ -375,7 +382,7 @@ def render_codebase_search(selected_project: dict) -> None:
 
 
 def render_codebase_explain_section() -> None:
-    st.header("File Explanations")
+    st.subheader("File Explanations")
     st.info(
         "File explanations will appear here.\n\n"
         "Next, this section will let you select a file, generate explanations for its "
@@ -422,7 +429,7 @@ def render_codebase_subsection_switcher() -> str:
 
 
 def render_codebase_section(selected_project: dict) -> None:
-    st.header("Codebase Workspace")
+    render_workspace_heading("Codebase Workspace")
 
     active_subsection = render_codebase_subsection_switcher()
 
@@ -860,7 +867,8 @@ def render_add_task_dialog(selected_project: dict) -> None:
 
 
 def render_tasks_section(selected_project: dict) -> None:
-    st.header("Task Workspace")
+    render_workspace_heading("Task Workspace")
+    st.subheader("Tasks")
     st.write("Create and manage development tasks for this project.")
 
     if st.button("Add Task"):
