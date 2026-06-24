@@ -1,3 +1,5 @@
+import html
+
 import streamlit as st
 
 from data.project_repository import (
@@ -22,6 +24,23 @@ def format_file_size(size_bytes: int) -> str:
 
     size_mb = size_kb / 1024
     return f"{size_mb:.1f} MB"
+
+
+def render_muted_meta(text) -> None:
+    safe_text = html.escape(str(text))
+    st.markdown(
+        f"""
+        <p style="
+            color: #A0A7B4;
+            font-size: 0.85rem;
+            line-height: 1.3;
+            margin: 0.25rem 0 0.75rem 0;
+        ">
+            {safe_text}
+        </p>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def initialize_session_state() -> None:
@@ -254,7 +273,9 @@ def render_projects() -> None:
                 st.write("No description provided.")
 
             st.write(f"Tasks: {get_project_task_count(project)}")
-            st.write(f"Last updated: {format_relative_time(project.get('updated_at'))}")
+            render_muted_meta(
+                f"Last updated: {format_relative_time(project.get('updated_at'))}"
+            )
             st.write(f"ZIP: {project['original_zip_filename']}")
             st.write(f"File size: {format_file_size(project['zip_file_size'])}")
 

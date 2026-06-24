@@ -8,6 +8,16 @@ from openai import APIError, OpenAI
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 
 ALLOWED_SUBTASK_STATUS_VALUES = {"done", "partial", "missing", "unclear"}
+ALLOWED_FILE_EXPLANATION_KINDS = {
+    "class",
+    "function",
+    "method",
+    "variable",
+    "constant",
+    "section",
+    "import",
+    "other",
+}
 
 REQUIRED_RETRIEVED_CHUNK_FIELDS = {
     "file_path",
@@ -125,6 +135,154 @@ def build_codebase_overview_prompt(
         )
 
     return "\n".join(prompt_sections)
+
+
+def build_file_explanation_prompt(
+    project_name,
+    project_description,
+    file_path,
+    file_content,
+):
+    cleaned_project_name = project_name.strip() or "Untitled Project"
+    cleaned_project_description = project_description.strip()
+    cleaned_file_path = file_path.strip()
+    cleaned_file_content = file_content.strip()
+
+    if not cleaned_file_path:
+        raise ValueError("File path must not be empty.")
+
+    if not cleaned_file_content:
+        raise ValueError("File content must not be empty.")
+
+    prompt_sections = [
+        "You are Codebase Compass, a project assistant that explains code files.",
+        "",
+        "Instructions:",
+        "- Explain the selected file using only the provided file content.",
+        "- Do not invent files, dependencies, behavior, or implementation details "
+        "outside the file.",
+        "- Return valid JSON only, with no Markdown and no code fences.",
+        "- Prefer fewer, useful explanations over explaining every tiny line.",
+        "- Use beginner-friendly explanations that are clear but not childish.",
+        "- For each element, explain what it does, why it matters in the file, and how "
+        "it relates to the project if clear.",
+        "- Line numbers must be 1-based. If exact line numbers are unclear, estimate "
+        "based on the visible file content.",
+        "- Element kind must be one of: class, function, method, variable, constant, "
+        "section, import, other.",
+        "",
+        "Expected JSON structure:",
+        "{",
+        '  "file_path": "path/to/file.py",',
+        '  "summary": "Short explanation of what this file does overall.",',
+        '  "elements": [',
+        "    {",
+        '      "name": "ElementName",',
+        '      "kind": "function",',
+        '      "start_line": 1,',
+        '      "end_line": 10,',
+        '      "explanation": "What this element does and why it matters."',
+        "    }",
+        "  ]",
+        "}",
+        "",
+        "Required fields:",
+        "file_path, summary, elements, name, kind, start_line, end_line, explanation",
+        "",
+        "Project name:",
+        cleaned_project_name,
+        "",
+        "Project description:",
+        cleaned_project_description or "No description provided.",
+        "",
+        "File path:",
+        cleaned_file_path,
+        "",
+        "File content:",
+        cleaned_file_content,
+    ]
+
+    return "\n".join(prompt_sections)
+
+
+def normalize_file_explanation_line_number(value):
+    if isinstance(value, bool):
+        return None
+
+    if isinstance(value, int):
+        return value if value > 0 else None
+
+    if isinstance(value, str):
+        cleaned_value = value.strip()
+        if cleaned_value.isdigit():
+            parsed_value = int(cleaned_value)
+            return parsed_value if parsed_value > 0 else None
+
+    return None
+
+
+def normalize_file_explanation_element(element):
+    if not isinstance(element, dict):
+        return None
+
+    name = element.get("name", "")
+    explanation = element.get("explanation", "")
+
+    cleaned_name = name.strip() if isinstance(name, str) else ""
+    cleaned_explanation = explanation.strip() if isinstance(explanation, str) else ""
+
+    if not cleaned_name or not cleaned_explanation:
+        return None
+
+    kind = element.get("kind", "other")
+    cleaned_kind = kind.strip() if isinstance(kind, str) else "other"
+    if cleaned_kind not in ALLOWED_FILE_EXPLANATION_KINDS:
+        cleaned_kind = "other"
+
+    start_line = normalize_file_explanation_line_number(element.get("start_line"))
+    end_line = normalize_file_explanation_line_number(element.get("end_line"))
+
+    if start_line is not None and end_line is not None and end_line < start_line:
+        end_line = start_line
+
+    return {
+        "name": cleaned_name,
+        "kind": cleaned_kind,
+        "start_line": start_line,
+        "end_line": end_line,
+        "explanation": cleaned_explanation,
+    }
+
+
+def validate_file_explanations(file_explanations, fallback_file_path):
+    if not isinstance(file_explanations, dict):
+        raise RuntimeError("OpenAI returned file explanations that are not a JSON object.")
+
+    response_file_path = file_explanations.get("file_path", "")
+    cleaned_file_path = (
+        response_file_path.strip()
+        if isinstance(response_file_path, str) and response_file_path.strip()
+        else fallback_file_path.strip()
+    )
+
+    summary = file_explanations.get("summary", "")
+    cleaned_summary = summary.strip() if isinstance(summary, str) else ""
+
+    elements = file_explanations.get("elements", [])
+    if not isinstance(elements, list):
+        elements = []
+
+    cleaned_elements = [
+        cleaned_element
+        for element in elements
+        if (cleaned_element := normalize_file_explanation_element(element)) is not None
+    ]
+
+    return {
+        "file_path": cleaned_file_path,
+        "summary": cleaned_summary,
+        "elements": cleaned_elements,
+    }
 
 
 def build_task_plan_prompt(
@@ -295,6 +453,53 @@ def generate_task_plan(
         raise RuntimeError("OpenAI returned an invalid JSON task plan.") from error
 
     return validate_task_plan(task_plan)
+
+
+def generate_file_explanations(
+    project_name,
+    project_description,
+    file_path,
+    file_content,
+    client=None,
+    model=None,
+):
+    prompt = build_file_explanation_prompt(
+        project_name,
+        project_description,
+        file_path,
+        file_content,
+    )
+
+    load_dotenv()
+
+    selected_model = model or os.getenv("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
+
+    if client is None:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY environment variable must be configured.")
+
+        client = OpenAI(api_key=api_key)
+
+    try:
+        response = client.responses.create(
+            model=selected_model,
+            input=prompt,
+        )
+    except APIError as error:
+        raise RuntimeError("Could not generate file explanations from OpenAI.") from error
+
+    output_text = getattr(response, "output_text", None)
+
+    if output_text is None or not output_text.strip():
+        raise RuntimeError("OpenAI returned empty file explanations.")
+
+    try:
+        file_explanations = json.loads(output_text.strip())
+    except json.JSONDecodeError as error:
+        raise RuntimeError("OpenAI returned invalid JSON file explanations.") from error
+
+    return validate_file_explanations(file_explanations, file_path)
 
 
 def build_subtask_status_prompt(

@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -6,6 +7,7 @@ from data.database import DEFAULT_DB_PATH, get_connection, initialize_database
 
 
 CODEBASE_OVERVIEW_OUTPUT_TYPE = "codebase_overview"
+FILE_EXPLANATION_OUTPUT_TYPE_PREFIX = "file_explanation::"
 
 
 def _current_timestamp():
@@ -32,6 +34,16 @@ def row_to_project_ai_output(row):
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def build_file_explanation_output_type(file_path):
+    cleaned_file_path = _validate_required_text(file_path, "File path")
+    normalized_file_path = cleaned_file_path.replace("\\", "/")
+
+    while normalized_file_path.startswith("./"):
+        normalized_file_path = normalized_file_path[2:]
+
+    return f"{FILE_EXPLANATION_OUTPUT_TYPE_PREFIX}{normalized_file_path}"
 
 
 def save_project_ai_output(
@@ -102,6 +114,28 @@ def save_project_ai_output(
     )
 
 
+def save_file_explanation(
+    project_id,
+    file_path,
+    explanation,
+    db_path=DEFAULT_DB_PATH,
+):
+    _validate_required_text(project_id, "Project ID")
+    output_type = build_file_explanation_output_type(file_path)
+
+    if not isinstance(explanation, dict):
+        raise ValueError("File explanation must be a dictionary.")
+
+    content = json.dumps(explanation)
+
+    return save_project_ai_output(
+        project_id,
+        output_type,
+        content,
+        db_path=db_path,
+    )
+
+
 def get_project_ai_output(
     project_id,
     output_type,
@@ -125,6 +159,24 @@ def get_project_ai_output(
     return row_to_project_ai_output(row)
 
 
+def get_file_explanation(
+    project_id,
+    file_path,
+    db_path=DEFAULT_DB_PATH,
+):
+    _validate_required_text(project_id, "Project ID")
+    output_type = build_file_explanation_output_type(file_path)
+
+    output = get_project_ai_output(project_id, output_type, db_path=db_path)
+    if output is None:
+        return None
+
+    try:
+        return json.loads(output["content"])
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Saved file explanation contains invalid JSON.") from error
+
+
 def list_project_ai_outputs(project_id, db_path=DEFAULT_DB_PATH):
     cleaned_project_id = _validate_required_text(project_id, "Project ID")
     initialize_database(db_path)
@@ -140,3 +192,30 @@ def list_project_ai_outputs(project_id, db_path=DEFAULT_DB_PATH):
         ).fetchall()
 
     return [row_to_project_ai_output(row) for row in rows]
+
+
+def list_file_explanations(project_id, db_path=DEFAULT_DB_PATH):
+    _validate_required_text(project_id, "Project ID")
+    outputs = list_project_ai_outputs(project_id, db_path=db_path)
+    file_explanations = []
+
+    for output in outputs:
+        output_type = output["output_type"]
+        if not output_type.startswith(FILE_EXPLANATION_OUTPUT_TYPE_PREFIX):
+            continue
+
+        try:
+            explanation = json.loads(output["content"])
+        except json.JSONDecodeError as error:
+            raise RuntimeError("Saved file explanation contains invalid JSON.") from error
+
+        file_explanations.append(
+            {
+                "file_path": output_type.removeprefix(FILE_EXPLANATION_OUTPUT_TYPE_PREFIX),
+                "explanation": explanation,
+                "created_at": output["created_at"],
+                "updated_at": output["updated_at"],
+            }
+        )
+
+    return file_explanations

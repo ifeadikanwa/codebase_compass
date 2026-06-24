@@ -7,6 +7,8 @@ import streamlit as st
 from data.project_ai_output_repository import (
     CODEBASE_OVERVIEW_OUTPUT_TYPE,
     get_project_ai_output,
+    list_file_explanations,
+    save_file_explanation,
     save_project_ai_output,
 )
 from data.project_repository import get_project_record_by_id, get_project_record_by_name
@@ -19,6 +21,7 @@ from data.task_repository import (
 from services.llm_service import (
     answer_codebase_question,
     generate_codebase_overview,
+    generate_file_explanations,
     generate_subtask_status,
     generate_task_plan,
 )
@@ -31,6 +34,7 @@ from services.task_service import (
 )
 from utils.file_reader import read_code_file
 from utils.file_scanner import scan_supported_files
+from utils.code_element_locator import locate_code_element
 from utils.markdown_formatter import normalize_generated_markdown
 from utils.time_formatter import format_relative_time
 
@@ -101,6 +105,23 @@ def render_workspace_heading(heading: str) -> None:
 def render_muted_helper_text(text: str) -> None:
     st.markdown(
         f"<p style='color: #A0A7B4; font-style: italic; margin-top: -0.25rem;'>{text}</p>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_muted_meta(text) -> None:
+    safe_text = html.escape(str(text))
+    st.markdown(
+        f"""
+        <p style="
+            color: #A0A7B4;
+            font-size: 0.85rem;
+            line-height: 1.3;
+            margin: 0.25rem 0 0.75rem 0;
+        ">
+            {safe_text}
+        </p>
+        """,
         unsafe_allow_html=True,
     )
 
@@ -176,6 +197,94 @@ def render_section_heading(title: str, help_text: str | None = None) -> None:
                     box-shadow: 0 10px 25px rgba(0,0,0,0.35);
                 ">
                     {safe_help_text}
+                </div>
+            </details>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_project_title_with_info(project: dict) -> None:
+    project_name = html.escape(project.get("name") or "Untitled Project")
+    description = html.escape(project.get("description") or "None")
+    uploaded_zip = html.escape(project.get("original_zip_filename") or "Unknown")
+
+    zip_file_size = project.get("zip_file_size")
+    file_size = format_file_size(zip_file_size) if isinstance(zip_file_size, int) else "Unknown"
+    file_size = html.escape(file_size)
+    codebase_path = html.escape(project.get("codebase_path") or "Unknown")
+
+    st.markdown(
+        f"""
+        <style>
+        summary::-webkit-details-marker {{
+            display: none;
+        }}
+
+        summary::marker {{
+            display: none;
+        }}
+        </style>
+        <div style="
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            margin-top: 0.75rem;
+            margin-bottom: 1rem;
+            position: relative;
+        ">
+            <h1 style="margin: 0; padding: 0; line-height: 1.2;">
+                {project_name}
+            </h1>
+            <details style="
+                position: relative;
+                display: inline-flex;
+                align-items: center;
+                margin: 0;
+                padding: 0;
+            ">
+                <summary style="
+                    list-style: none;
+                    cursor: pointer;
+                    color: #A0A7B4;
+                    font-size: 1rem;
+                    line-height: 1;
+                    display: inline-flex;
+                    align-items: center;
+                    transform: translateY(2px);
+                ">
+                    ⓘ
+                </summary>
+                <div style="
+                    position: absolute;
+                    top: 1.75rem;
+                    left: 0;
+                    z-index: 100;
+                    min-width: 280px;
+                    max-width: 420px;
+                    padding: 0.75rem;
+                    border: 1px solid #374151;
+                    border-radius: 0.5rem;
+                    background: #111827;
+                    color: #D1D5DB;
+                    font-size: 0.9rem;
+                    line-height: 1.4;
+                    box-shadow: 0 10px 25px rgba(0,0,0,0.35);
+                ">
+                    <strong>Project details</strong>
+                    <div style="margin-top: 0.75rem;">
+                        <strong>Description</strong><br>{description}
+                    </div>
+                    <div style="margin-top: 0.5rem;">
+                        <strong>Uploaded ZIP</strong><br>{uploaded_zip}
+                    </div>
+                    <div style="margin-top: 0.5rem;">
+                        <strong>File size</strong><br>{file_size}
+                    </div>
+                    <div style="margin-top: 0.5rem;">
+                        <strong>Codebase path</strong><br>{codebase_path}
+                    </div>
                 </div>
             </details>
         </div>
@@ -308,7 +417,9 @@ def render_codebase_overview(selected_project: dict) -> None:
     overview_button_label = "Regenerate Overview" if saved_overview else "Generate Overview"
 
     if saved_overview:
-        st.write(f"Generated {format_relative_time(saved_overview.get('updated_at'))}")
+        render_muted_meta(
+            f"Generated {format_relative_time(saved_overview.get('updated_at'))}"
+        )
 
         if is_overview_stale(selected_project, saved_overview):
             st.warning(
@@ -468,15 +579,192 @@ def render_codebase_search(selected_project: dict) -> None:
         render_search_result(result)
 
 
-def render_codebase_explain_section() -> None:
+def find_saved_file_explanation(project_id: str, file_path: str) -> dict | None:
+    saved_explanations = list_file_explanations(project_id)
+
+    for saved_explanation in saved_explanations:
+        if saved_explanation["file_path"] == file_path:
+            return saved_explanation
+
+    return None
+
+
+def format_code_line_label(located_element: dict) -> str:
+    start_line = located_element.get("start_line")
+    end_line = located_element.get("end_line")
+
+    if start_line is None and end_line is None:
+        return "Code:"
+
+    if start_line is not None and (end_line is None or end_line == start_line):
+        return f"Code: line {start_line}"
+
+    if start_line is not None and end_line is not None:
+        return f"Code: lines {start_line}-{end_line}"
+
+    return f"Code: line {end_line}"
+
+
+def format_element_name_label(name: str) -> str:
+    escaped_name = str(name).replace("`", "\\`")
+    return f"`{escaped_name}`"
+
+
+def format_element_kind_label(kind) -> str:
+    return str(kind).replace("`", "\\`")
+
+
+def render_file_explanation(explanation: dict, file_path: str, file_content: str) -> None:
+    st.subheader("File summary")
+    st.write(explanation.get("summary") or "No summary provided.")
+
+    elements = explanation.get("elements") or []
+    if not elements:
+        st.info("No explainable elements were found for this file.")
+        return
+
+    st.subheader("Elements")
+
+    for element in elements:
+        kind = element.get("kind", "other")
+        name = element.get("name", "Unnamed element")
+        located_element = locate_code_element(file_path, file_content, element)
+        name_label = format_element_name_label(name)
+        kind_label = format_element_kind_label(kind)
+        expander_title = f"{name_label}  •  _{kind_label}_"
+
+        with st.expander(expander_title, expanded=False):
+            st.write("Explanation:")
+            st.write(element.get("explanation", "No explanation provided."))
+            st.write(format_code_line_label(located_element))
+
+            snippet = located_element["snippet"]
+            if snippet:
+                render_code_content(file_path, snippet)
+            else:
+                render_muted_helper_text("Code snippet unavailable for this element.")
+
+
+def render_codebase_explain_section(selected_project: dict) -> None:
     render_section_heading(
         "File Explanations",
-        "This upcoming section will explain classes, functions, variables, and important code sections.",
+        "Generate a structured explanation of the selected file, including important "
+        "classes, functions, variables, constants, imports, and logic sections.",
     )
-    render_muted_helper_text(
-        "File explanations will appear here. Next, this section will let you generate "
-        "explanations for classes, functions, variables, and important sections."
+
+    codebase_path = selected_project.get("codebase_path")
+    if not codebase_path:
+        st.error("This project does not have a valid extracted codebase path.")
+        return
+
+    try:
+        supported_files = scan_supported_files(codebase_path)
+    except RuntimeError as error:
+        st.error(f"Could not scan codebase files: {error}")
+        return
+
+    if not supported_files:
+        st.info(
+            "No supported files found.\n\n"
+            "Make sure your ZIP contains supported source or text files before "
+            "generating file explanations."
+        )
+        return
+
+    file_options = ["Choose a file", *supported_files]
+    selected_file_path = st.selectbox(
+        "Select a file",
+        file_options,
+        key="file_explanation_file",
     )
+
+    if selected_file_path == "Choose a file":
+        st.info("Choose a file to generate explanations.")
+        return
+
+    try:
+        saved_explanation = find_saved_file_explanation(
+            selected_project["id"],
+            selected_file_path,
+        )
+    except RuntimeError:
+        st.error(
+            "The saved file explanation could not be loaded because it contains invalid JSON."
+        )
+        return
+    except Exception:
+        st.error("The saved file explanation could not be loaded.")
+        return
+
+    explanation = saved_explanation["explanation"] if saved_explanation else None
+
+    if saved_explanation:
+        render_muted_meta(
+            f"Generated {format_relative_time(saved_explanation.get('updated_at'))}"
+        )
+
+    button_label = (
+        "Regenerate File Explanations"
+        if saved_explanation
+        else "Generate File Explanations"
+    )
+
+    if st.button(button_label):
+        try:
+            file_content = read_code_file(codebase_path, selected_file_path)
+        except RuntimeError as error:
+            st.error(f"Could not read selected file: {error}")
+            return
+
+        try:
+            with st.spinner("Generating file explanations..."):
+                generated_explanation = generate_file_explanations(
+                    project_name=selected_project["name"],
+                    project_description=selected_project.get("description", ""),
+                    file_path=selected_file_path,
+                    file_content=file_content,
+                )
+        except Exception:
+            st.error(
+                "The file explanations could not be generated. "
+                "Please check your API key or try again."
+            )
+            return
+
+        try:
+            save_file_explanation(
+                project_id=selected_project["id"],
+                file_path=selected_file_path,
+                explanation=generated_explanation,
+            )
+        except Exception:
+            st.error(
+                "The file explanations were generated but could not be saved. Please try again."
+            )
+            return
+
+        st.success("File explanations saved.")
+        st.rerun()
+
+    try:
+        file_content = read_code_file(codebase_path, selected_file_path)
+    except RuntimeError as error:
+        st.error(f"Could not read selected file source: {error}")
+        return
+
+    if explanation:
+        render_file_explanation(explanation, selected_file_path, file_content)
+    else:
+        st.info(
+            "No file explanations generated yet.\n\n"
+            "Generate explanations to understand this file's classes, functions, "
+            "variables, and important logic sections."
+        )
+
+    st.subheader("Source File")
+
+    with st.expander("View full source file", expanded=False):
+        render_code_content(selected_file_path, file_content)
 
 
 def render_project_home_section_switcher() -> str:
@@ -526,7 +814,7 @@ def render_codebase_section(selected_project: dict) -> None:
     elif active_subsection == CODEBASE_ASK_SUBSECTION:
         render_codebase_search(selected_project)
     elif active_subsection == CODEBASE_EXPLAIN_SUBSECTION:
-        render_codebase_explain_section()
+        render_codebase_explain_section(selected_project)
     else:
         render_codebase_overview(selected_project)
 
@@ -666,7 +954,8 @@ def render_ai_status_badge(status_result: dict | None, relative_time: str | None
         label = f"AI opinion: {status_label}"
 
     time_text = (
-        f"<span style='margin-left:8px; color:#CBD5E1; font-size:0.85rem;'>{relative_time}</span>"
+        f"<span style='margin-left:8px; color:#A0A7B4; font-size:0.8rem;'>"
+        f"{html.escape(relative_time)}</span>"
         if relative_time
         else ""
     )
@@ -996,16 +1285,7 @@ def main() -> None:
     if st.button("← My Projects"):
         return_to_projects()
 
-    st.title(selected_project["name"])
-
-    if selected_project["description"]:
-        st.write(selected_project["description"])
-    else:
-        st.write("No description provided.")
-
-    st.write(f"Uploaded ZIP: {selected_project['original_zip_filename']}")
-    st.write(f"File size: {format_file_size(selected_project['zip_file_size'])}")
-    st.write(f"Codebase path: {selected_project['codebase_path']}")
+    render_project_title_with_info(selected_project)
 
     active_section = render_project_home_section_switcher()
 
