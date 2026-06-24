@@ -63,6 +63,7 @@ def row_to_task(row):
         "human_status": row["human_status"],
         "goal": row["goal"],
         "subtasks": _json_loads(row["subtasks_json"], []),
+        "subtask_sources": _json_loads(row["subtask_sources_json"], []),
         "completed_subtasks": _json_loads(row["completed_subtasks_json"], []),
         "acceptance_criteria": _json_loads(row["acceptance_criteria_json"], []),
         "relevant_files": _json_loads(row["relevant_files_json"], []),
@@ -93,6 +94,7 @@ def create_task_record(project_id, task, db_path=DEFAULT_DB_PATH):
                     human_status,
                     goal,
                     subtasks_json,
+                    subtask_sources_json,
                     completed_subtasks_json,
                     acceptance_criteria_json,
                     relevant_files_json,
@@ -100,7 +102,7 @@ def create_task_record(project_id, task, db_path=DEFAULT_DB_PATH):
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 (
                     task_id,
@@ -110,6 +112,7 @@ def create_task_record(project_id, task, db_path=DEFAULT_DB_PATH):
                     task.get("human_status", "not_started"),
                     task.get("goal", ""),
                     _json_dumps(task.get("subtasks", [])),
+                    _json_dumps(task.get("subtask_sources", [])),
                     _json_dumps(task.get("completed_subtasks", [])),
                     _json_dumps(task.get("acceptance_criteria", [])),
                     _json_dumps(task.get("relevant_files", [])),
@@ -192,6 +195,7 @@ def update_task_record(task, db_path=DEFAULT_DB_PATH):
                     human_status = ?,
                     goal = ?,
                     subtasks_json = ?,
+                    subtask_sources_json = ?,
                     completed_subtasks_json = ?,
                     acceptance_criteria_json = ?,
                     relevant_files_json = ?,
@@ -205,6 +209,7 @@ def update_task_record(task, db_path=DEFAULT_DB_PATH):
                     updated_task.get("human_status", "not_started"),
                     updated_task.get("goal", ""),
                     _json_dumps(updated_task.get("subtasks", [])),
+                    _json_dumps(updated_task.get("subtask_sources", [])),
                     _json_dumps(updated_task.get("completed_subtasks", [])),
                     _json_dumps(updated_task.get("acceptance_criteria", [])),
                     _json_dumps(updated_task.get("relevant_files", [])),

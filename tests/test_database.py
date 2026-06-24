@@ -143,6 +143,7 @@ def test_tasks_table_has_expected_columns(tmp_path):
         "human_status",
         "goal",
         "subtasks_json",
+        "subtask_sources_json",
         "completed_subtasks_json",
         "acceptance_criteria_json",
         "relevant_files_json",
@@ -174,6 +175,35 @@ def test_initialize_database_is_idempotent(tmp_path):
     initialize_database(db_path)
 
     assert db_path.exists()
+
+
+def test_initialize_database_migrates_existing_tasks_table_with_subtask_sources(tmp_path):
+    db_path = tmp_path / "test.db"
+
+    with get_connection(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                human_status TEXT NOT NULL DEFAULT 'not_started',
+                goal TEXT NOT NULL DEFAULT '',
+                subtasks_json TEXT NOT NULL DEFAULT '[]',
+                completed_subtasks_json TEXT NOT NULL DEFAULT '[]',
+                acceptance_criteria_json TEXT NOT NULL DEFAULT '[]',
+                relevant_files_json TEXT NOT NULL DEFAULT '[]',
+                ai_subtask_statuses_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+
+    initialize_database(db_path)
+
+    assert "subtask_sources_json" in get_table_columns(db_path, "tasks")
 
 
 def test_tasks_table_has_project_foreign_key(tmp_path):

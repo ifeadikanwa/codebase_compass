@@ -1,6 +1,11 @@
 from uuid import uuid4
 
 
+GENERATED_SUBTASK_SOURCE = "generated"
+MANUAL_SUBTASK_SOURCE = "manual"
+VALID_SUBTASK_SOURCES = {GENERATED_SUBTASK_SOURCE, MANUAL_SUBTASK_SOURCE}
+
+
 def create_task(title, description=""):
     stripped_title = title.strip()
     stripped_description = description.strip()
@@ -14,6 +19,7 @@ def create_task(title, description=""):
         "description": stripped_description,
         "human_status": "not_started",
         "subtasks": [],
+        "subtask_sources": [],
         "completed_subtasks": [],
         "acceptance_criteria": [],
         "relevant_files": [],
@@ -54,10 +60,76 @@ def apply_task_plan_to_task(task, task_plan):
 
     task["goal"] = task_plan["goal"]
     task["subtasks"] = task_plan["subtasks"]
+    task["subtask_sources"] = [GENERATED_SUBTASK_SOURCE for _ in task["subtasks"]]
     task.setdefault("completed_subtasks", [])
     task["acceptance_criteria"] = task_plan["acceptance_criteria"]
     task["relevant_files"] = task_plan["relevant_files"]
 
+    return task
+
+
+def normalize_subtask_sources(task):
+    subtasks = task.get("subtasks", [])
+    if not isinstance(subtasks, list):
+        raise ValueError("Task subtasks must be a list.")
+
+    sources = task.get("subtask_sources", [])
+    if not isinstance(sources, list):
+        sources = []
+
+    normalized_sources = []
+    for index, _subtask in enumerate(subtasks):
+        source = sources[index] if index < len(sources) else GENERATED_SUBTASK_SOURCE
+        if source not in VALID_SUBTASK_SOURCES:
+            source = GENERATED_SUBTASK_SOURCE
+        normalized_sources.append(source)
+
+    task["subtask_sources"] = normalized_sources
+    return task
+
+
+def add_subtask_to_task(task, text, source=MANUAL_SUBTASK_SOURCE):
+    cleaned_text = text.strip()
+    if not cleaned_text:
+        raise ValueError("Subtask text must not be empty.")
+
+    if source not in VALID_SUBTASK_SOURCES:
+        raise ValueError("Subtask source is invalid.")
+
+    subtasks = task.setdefault("subtasks", [])
+    if not isinstance(subtasks, list):
+        raise ValueError("Task subtasks must be a list.")
+
+    normalize_subtask_sources(task)
+    subtasks.append(cleaned_text)
+    task["subtask_sources"].append(source)
+    task.setdefault("completed_subtasks", [])
+    task.setdefault("ai_subtask_statuses", {})
+    return task
+
+
+def update_subtask_text(task, index, text, source=MANUAL_SUBTASK_SOURCE):
+    cleaned_text = text.strip()
+    if not cleaned_text:
+        raise ValueError("Subtask text must not be empty.")
+
+    if source not in VALID_SUBTASK_SOURCES:
+        raise ValueError("Subtask source is invalid.")
+
+    subtasks = task.get("subtasks")
+    if not isinstance(subtasks, list):
+        raise ValueError("Task subtasks must be a list.")
+
+    if index < 0 or index >= len(subtasks):
+        raise ValueError("Subtask index is invalid.")
+
+    normalize_subtask_sources(task)
+    subtasks[index] = cleaned_text
+    task["subtask_sources"][index] = source
+
+    ai_subtask_statuses = task.setdefault("ai_subtask_statuses", {})
+    ai_subtask_statuses.pop(index, None)
+    ai_subtask_statuses.pop(str(index), None)
     return task
 
 

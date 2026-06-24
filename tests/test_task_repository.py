@@ -40,6 +40,7 @@ def make_full_task(task_id="task-1", title="Add login"):
         "human_status": "in_progress",
         "goal": "Clear goal text",
         "subtasks": ["Create login form"],
+        "subtask_sources": ["generated"],
         "completed_subtasks": [0],
         "acceptance_criteria": ["User can log in"],
         "relevant_files": ["app.py"],
@@ -91,6 +92,7 @@ def test_create_task_record_saves_and_loads_json_fields(tmp_path):
     loaded_task = get_task_record_by_id(created_task["id"], db_path=db_path)
 
     assert loaded_task["subtasks"] == ["Create login form"]
+    assert loaded_task["subtask_sources"] == ["generated"]
     assert loaded_task["completed_subtasks"] == [0]
     assert loaded_task["acceptance_criteria"] == ["User can log in"]
     assert loaded_task["relevant_files"] == ["app.py"]
@@ -252,6 +254,7 @@ def test_update_task_record_updates_task_fields(tmp_path):
             "human_status": "complete",
             "goal": "Updated goal",
             "subtasks": ["Update login form"],
+            "subtask_sources": ["manual"],
             "completed_subtasks": [0],
             "acceptance_criteria": ["User can sign in"],
             "relevant_files": ["app.py"],
@@ -272,6 +275,7 @@ def test_update_task_record_updates_task_fields(tmp_path):
     assert updated_task["human_status"] == "complete"
     assert updated_task["goal"] == "Updated goal"
     assert updated_task["subtasks"] == ["Update login form"]
+    assert updated_task["subtask_sources"] == ["manual"]
     assert updated_task["completed_subtasks"] == [0]
     assert updated_task["acceptance_criteria"] == ["User can sign in"]
     assert updated_task["relevant_files"] == ["app.py"]

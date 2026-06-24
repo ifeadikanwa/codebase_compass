@@ -1,12 +1,15 @@
 import pytest
 
 from services.task_service import (
+    add_subtask_to_task,
     add_task_to_project,
     apply_ai_status_to_subtask,
     apply_task_plan_to_task,
     create_task,
     get_project_tasks,
+    normalize_subtask_sources,
     set_subtask_completion,
+    update_subtask_text,
 )
 
 
@@ -21,6 +24,7 @@ def test_create_task_creates_valid_task():
     assert task["description"] == "Users should be able to sign in and sign out."
     assert task["human_status"] == "not_started"
     assert task["subtasks"] == []
+    assert task["subtask_sources"] == []
     assert task["completed_subtasks"] == []
     assert task["acceptance_criteria"] == []
     assert task["relevant_files"] == []
@@ -102,6 +106,7 @@ def test_apply_task_plan_to_task_updates_existing_task():
     assert updated_task is task
     assert task["goal"] == "Add login support."
     assert task["subtasks"] == ["Update auth service"]
+    assert task["subtask_sources"] == ["generated"]
     assert task["acceptance_criteria"] == ["Users can sign in"]
     assert task["relevant_files"] == ["services/auth_service.py"]
 
@@ -127,7 +132,47 @@ def test_apply_task_plan_to_task_rejects_missing_plan_fields(missing_field):
 def make_task_with_subtasks():
     task = create_task("Add login")
     task["subtasks"] = ["Update auth service", "Add login form", "Add tests"]
+    task["subtask_sources"] = ["generated", "generated", "generated"]
     return task
+
+
+def test_add_subtask_to_task_adds_manual_subtask_and_preserves_state():
+    task = make_task_with_subtasks()
+    task["completed_subtasks"] = [0]
+    task["ai_subtask_statuses"] = {0: make_ai_status_result()}
+
+    add_subtask_to_task(task, "  Add password reset  ")
+
+    assert task["subtasks"] == [
+        "Update auth service",
+        "Add login form",
+        "Add tests",
+        "Add password reset",
+    ]
+    assert task["subtask_sources"] == ["generated", "generated", "generated", "manual"]
+    assert task["completed_subtasks"] == [0]
+    assert task["ai_subtask_statuses"] == {0: make_ai_status_result()}
+
+
+def test_update_subtask_text_marks_generated_subtask_manual_and_clears_ai_status():
+    task = make_task_with_subtasks()
+    task["ai_subtask_statuses"] = {1: make_ai_status_result(), 2: make_ai_status_result()}
+
+    update_subtask_text(task, 1, "  Add login form and validation  ")
+
+    assert task["subtasks"][1] == "Add login form and validation"
+    assert task["subtask_sources"][1] == "manual"
+    assert task["ai_subtask_statuses"] == {2: make_ai_status_result()}
+
+
+def test_normalize_subtask_sources_defaults_missing_and_invalid_sources_to_generated():
+    task = create_task("Add login")
+    task["subtasks"] = ["First", "Second", "Third"]
+    task["subtask_sources"] = ["manual", "bad-value"]
+
+    normalize_subtask_sources(task)
+
+    assert task["subtask_sources"] == ["manual", "generated", "generated"]
 
 
 def test_set_subtask_completion_marks_one_subtask_complete():

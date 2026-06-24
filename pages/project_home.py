@@ -29,10 +29,13 @@ from services.llm_service import (
 )
 from services.retrieval_service import search_codebase
 from services.task_service import (
+    add_subtask_to_task,
     apply_ai_status_to_subtask,
     apply_task_plan_to_task,
     create_task,
+    normalize_subtask_sources,
     set_subtask_completion,
+    update_subtask_text,
 )
 from services.vector_search_service import (
     build_project_vector_index,
@@ -80,6 +83,10 @@ CODEBASE_SUBSECTIONS = [
     CODEBASE_ASK_SUBSECTION,
     CODEBASE_EXPLAIN_SUBSECTION,
 ]
+TASK_VIEW_KEY = "task_view"
+SELECTED_TASK_ID_KEY = "selected_task_id"
+TASK_LIST_VIEW = "list"
+TASK_DETAIL_VIEW = "detail"
 
 AI_STATUS_BADGE_STYLES = {
     "done": ("✓ Done", "#22C55E"),
@@ -927,6 +934,18 @@ def clear_task_editing() -> None:
     st.session_state.pop("editing_task_id", None)
 
 
+def clear_goal_editing() -> None:
+    st.session_state.pop("editing_goal_task_id", None)
+
+
+def clear_adding_subtask() -> None:
+    st.session_state.pop("adding_subtask_task_id", None)
+
+
+def clear_subtask_editing() -> None:
+    st.session_state.pop("editing_subtask", None)
+
+
 def task_has_generated_content(task: dict) -> bool:
     return any(
         [
@@ -943,6 +962,7 @@ def reset_generated_task_fields(task: dict) -> dict:
     task["human_status"] = "not_started"
     task["goal"] = ""
     task["subtasks"] = []
+    task["subtask_sources"] = []
     task["completed_subtasks"] = []
     task["acceptance_criteria"] = []
     task["relevant_files"] = []
@@ -963,6 +983,9 @@ def delete_task(task: dict) -> None:
     clear_pending_task_delete()
 
     if deleted:
+        if st.session_state.get(SELECTED_TASK_ID_KEY) == task["id"]:
+            st.session_state[TASK_VIEW_KEY] = TASK_LIST_VIEW
+            st.session_state[SELECTED_TASK_ID_KEY] = None
         st.success("Task deleted.")
     else:
         st.warning("This task was already deleted.")
@@ -1157,33 +1180,192 @@ def render_subtask_ai_status(
                 st.write("Relevant files: None")
 
 
-def render_task_plan(selected_project: dict, task: dict) -> None:
-    if "goal" in task:
-        st.subheader("Goal")
-        st.write(task["goal"])
+def render_task_goal(task: dict) -> None:
+    st.subheader("Goal")
 
-    if task["subtasks"]:
-        st.subheader("Subtasks")
+    if st.session_state.get("editing_goal_task_id") == task["id"]:
+        with st.form(f"edit_goal_form_{task['id']}"):
+            edited_goal = st.text_area("Goal", value=task.get("goal", ""))
+            save_submitted = st.form_submit_button("Save")
+            cancel_submitted = st.form_submit_button("Cancel")
+
+        if cancel_submitted:
+            clear_goal_editing()
+            st.rerun()
+
+        if save_submitted:
+            updated_task = {
+                **task,
+                "goal": edited_goal.strip(),
+            }
+            if save_task_update(updated_task, success_message="Goal updated."):
+                clear_goal_editing()
+                st.rerun()
+
+        return
+
+    if task.get("goal"):
+        st.write(task["goal"])
+    else:
+        render_muted_meta("No goal yet.")
+
+    if st.button("Edit goal", key=f"edit_goal_{task['id']}"):
+        st.session_state["editing_goal_task_id"] = task["id"]
+        st.rerun()
+
+
+def render_add_subtask_form(task: dict) -> None:
+    if st.session_state.get("adding_subtask_task_id") != task["id"]:
+        return
+
+    with st.form(f"add_subtask_form_{task['id']}"):
+        subtask_text = st.text_area("New subtask")
+        save_submitted = st.form_submit_button("Save")
+        cancel_submitted = st.form_submit_button("Cancel")
+
+    if cancel_submitted:
+        clear_adding_subtask()
+        st.rerun()
+
+    if not save_submitted:
+        return
+
+    try:
+        add_subtask_to_task(task, subtask_text)
+    except ValueError as error:
+        st.error(f"Could not add subtask: {error}")
+        return
+
+    if save_task_update(task, success_message="Subtask added."):
+        clear_adding_subtask()
+        st.rerun()
+
+
+def render_subtask_source_label(source: str) -> None:
+    label = "Manual" if source == "manual" else "Generated"
+    render_muted_meta(label)
+
+
+def render_subtask_edit_form(task: dict, index: int, subtask: str) -> bool:
+    editing_subtask = st.session_state.get("editing_subtask")
+    if editing_subtask != {"task_id": task["id"], "index": index}:
+        return False
+
+    with st.form(f"edit_subtask_form_{task['id']}_{index}"):
+        edited_subtask = st.text_area("Subtask", value=subtask)
+        save_submitted = st.form_submit_button("Save")
+        cancel_submitted = st.form_submit_button("Cancel")
+
+    if cancel_submitted:
+        clear_subtask_editing()
+        st.rerun()
+
+    if save_submitted:
+        try:
+            update_subtask_text(task, index, edited_subtask)
+        except ValueError as error:
+            st.error(f"Could not update subtask: {error}")
+            return True
+
+        if save_task_update(task, success_message="Subtask updated."):
+            clear_subtask_editing()
+            st.rerun()
+
+    return True
+
+
+def render_subtask_row(
+    selected_project: dict,
+    task: dict,
+    index: int,
+    subtask: str,
+) -> None:
+    with st.container(border=False):
+        if render_subtask_edit_form(task, index, subtask):
+            st.markdown(
+                "<div style='margin-bottom: 1.25rem;'></div>",
+                unsafe_allow_html=True,
+            )
+            return
+
+        checkbox_column, edit_column = st.columns([0.86, 0.14])
         completed_subtasks = task.setdefault("completed_subtasks", [])
-        for index, subtask in enumerate(task["subtasks"]):
+
+        with checkbox_column:
             checked_value = st.checkbox(
                 subtask,
                 value=index in completed_subtasks,
                 key=f"subtask_{task['id']}_{index}",
             )
-            previous_completed_subtasks = list(completed_subtasks)
-            previous_human_status = task["human_status"]
-            set_subtask_completion(task, index, checked_value)
 
-            if (
-                task["completed_subtasks"] != previous_completed_subtasks
-                or task["human_status"] != previous_human_status
-            ):
-                save_task_update(task)
+        with edit_column:
+            if st.button("Edit", key=f"edit_subtask_{task['id']}_{index}"):
+                st.session_state["editing_subtask"] = {
+                    "task_id": task["id"],
+                    "index": index,
+                }
+                clear_adding_subtask()
+                st.rerun()
+            st.markdown(
+                "<div style='margin-bottom: 0.65rem;'></div>",
+                unsafe_allow_html=True,
+            )
 
-            _, ai_column = st.columns([0.04, 0.96])
-            with ai_column:
-                render_subtask_ai_status(selected_project, task, index, subtask)
+        previous_completed_subtasks = list(completed_subtasks)
+        previous_human_status = task["human_status"]
+        set_subtask_completion(task, index, checked_value)
+
+        if (
+            task["completed_subtasks"] != previous_completed_subtasks
+            or task["human_status"] != previous_human_status
+        ):
+            save_task_update(task)
+
+        _, detail_column = st.columns([0.04, 0.96])
+        with detail_column:
+            render_subtask_source_label(task["subtask_sources"][index])
+            render_subtask_ai_status(selected_project, task, index, subtask)
+
+        st.markdown(
+            "<div style='margin-bottom: 1.5rem;'></div>",
+            unsafe_allow_html=True,
+        )
+
+
+def render_subtask_divider() -> None:
+    st.markdown(
+        """
+        <hr style="
+            border: none;
+            border-top: 1px solid rgba(160, 167, 180, 0.25);
+            margin: 1.25rem 0;
+        " />
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_task_plan(selected_project: dict, task: dict) -> None:
+    render_task_goal(task)
+
+    st.subheader("Subtasks")
+
+    if st.button("Add subtask", key=f"add_subtask_{task['id']}"):
+        st.session_state["adding_subtask_task_id"] = task["id"]
+        clear_subtask_editing()
+        st.rerun()
+
+    render_add_subtask_form(task)
+
+    if task["subtasks"]:
+        normalize_subtask_sources(task)
+        completed_subtasks = task.setdefault("completed_subtasks", [])
+        for index, subtask in enumerate(task["subtasks"]):
+            render_subtask_row(selected_project, task, index, subtask)
+            if index < len(task["subtasks"]) - 1:
+                render_subtask_divider()
+    else:
+        render_muted_meta("No subtasks yet.")
 
     if task["acceptance_criteria"]:
         st.subheader("Acceptance Criteria")
@@ -1242,63 +1424,188 @@ def generate_plan_for_task(selected_project: dict, task: dict) -> None:
     st.rerun()
 
 
-def render_task_card(selected_project: dict, task: dict) -> None:
+def format_task_status(status: str) -> str:
+    return str(status).replace("_", " ").title()
+
+
+def is_task_checked(task: dict) -> bool:
+    return task.get("human_status") in {"done", "complete"}
+
+
+def update_task_checked_state(task: dict, is_checked: bool) -> None:
+    updated_task = {
+        **task,
+        "human_status": "done" if is_checked else "not_started",
+    }
+
+    if save_task_update(updated_task):
+        st.rerun()
+
+
+def open_task_detail(task: dict) -> None:
+    st.session_state[SELECTED_TASK_ID_KEY] = task["id"]
+    st.session_state[TASK_VIEW_KEY] = TASK_DETAIL_VIEW
+    clear_pending_task_delete()
+    clear_task_editing()
+    st.rerun()
+
+
+def render_task_actions_menu(task: dict) -> None:
+    with st.popover("⋯"):
+        if st.button("Edit task", key=f"edit_task_{task['id']}"):
+            st.session_state["editing_task_id"] = task["id"]
+            clear_pending_task_delete()
+            st.rerun()
+
+        if st.button("Delete task", key=f"delete_task_{task['id']}"):
+            st.session_state["pending_delete_task_id"] = task["id"]
+            clear_task_editing()
+            st.rerun()
+
+
+def render_task_delete_confirmation(task: dict) -> None:
+    if st.session_state.get("pending_delete_task_id") != task["id"]:
+        return
+
+    st.warning("Delete this task? This cannot be undone.")
+    confirm_column, cancel_column = st.columns(2)
+
+    with confirm_column:
+        if st.button(
+            "Confirm delete",
+            key=f"confirm_delete_task_{task['id']}",
+        ):
+            delete_task(task)
+
+    with cancel_column:
+        if st.button("Cancel", key=f"cancel_delete_task_{task['id']}"):
+            clear_pending_task_delete()
+            st.rerun()
+
+
+def render_task_list_card(task: dict) -> None:
     with st.container(border=True):
-        st.subheader(task["title"])
+        title_column, open_column, menu_column = st.columns([0.72, 0.16, 0.12])
 
-        action_columns = st.columns([0.12, 0.12, 0.76])
+        with title_column:
+            checked_value = is_task_checked(task)
+            updated_checked_value = st.checkbox(
+                task["title"],
+                value=checked_value,
+                key=f"task_complete_{task['id']}",
+            )
 
-        with action_columns[0]:
-            if st.button("Edit", key=f"edit_task_{task['id']}"):
-                st.session_state["editing_task_id"] = task["id"]
-                clear_pending_task_delete()
-                st.rerun()
+            if updated_checked_value != checked_value:
+                update_task_checked_state(task, updated_checked_value)
 
-        with action_columns[1]:
-            if st.button("Delete", key=f"delete_task_{task['id']}"):
-                st.session_state["pending_delete_task_id"] = task["id"]
-                clear_task_editing()
-                st.rerun()
+        with open_column:
+            if st.button("Open", key=f"open_task_{task['id']}"):
+                open_task_detail(task)
+
+        with menu_column:
+            render_task_actions_menu(task)
 
         if st.session_state.get("editing_task_id") == task["id"]:
             render_task_edit_form(task)
             return
 
-        if task["description"]:
-            st.write(task["description"])
+        render_task_delete_confirmation(task)
 
-        st.write(f"Human status: {task['human_status']}")
-        st.write(f"Subtasks: {len(task['subtasks'])}")
-        st.write(f"Acceptance criteria: {len(task['acceptance_criteria'])}")
-        st.write(f"Relevant files: {len(task['relevant_files'])}")
+        description = task.get("description", "")
+        metadata = (
+            f"Subtasks: {len(task.get('subtasks', []))} • "
+            f"Status: {format_task_status(task.get('human_status', 'not_started'))}"
+        )
 
-        if st.session_state.get("pending_delete_task_id") == task["id"]:
-            st.warning("Delete this task? This cannot be undone.")
-            confirm_column, cancel_column = st.columns(2)
+        description_html = (
+            f"<p style='margin: 0 0 0.25rem 0;'>{html.escape(description)}</p>"
+            if description
+            else ""
+        )
 
-            with confirm_column:
-                if st.button(
-                    "Confirm delete",
-                    key=f"confirm_delete_task_{task['id']}",
-                ):
-                    delete_task(task)
+        st.markdown(
+            f"""
+            <div style="margin-left: 1.9rem;">
+                {description_html}
+                <p style="
+                    color: #A0A7B4;
+                    font-size: 0.85rem;
+                    line-height: 1.3;
+                    margin: 0.25rem 0 0.75rem 0;
+                ">
+                    {html.escape(metadata)}
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-            with cancel_column:
-                if st.button("Cancel", key=f"cancel_delete_task_{task['id']}"):
-                    clear_pending_task_delete()
-                    st.rerun()
 
-        if st.button(
-            "Generate Plan",
-            key=f"generate_plan_{task['id']}",
-            help=(
-                "Generate Plan uses the current codebase to suggest a goal, subtasks, "
-                "acceptance criteria, and relevant files."
-            ),
-        ):
-            generate_plan_for_task(selected_project, task)
+def render_task_detail(selected_project: dict, task: dict) -> None:
+    if st.button("← Back to tasks"):
+        st.session_state[TASK_VIEW_KEY] = TASK_LIST_VIEW
+        st.session_state[SELECTED_TASK_ID_KEY] = None
+        clear_pending_task_delete()
+        clear_task_editing()
+        st.rerun()
 
-        render_task_plan(selected_project, task)
+    title_column, menu_column = st.columns([0.88, 0.12])
+
+    with title_column:
+        checked_value = is_task_checked(task)
+        updated_checked_value = st.checkbox(
+            task["title"],
+            value=checked_value,
+            key=f"task_detail_complete_{task['id']}",
+        )
+
+        if updated_checked_value != checked_value:
+            update_task_checked_state(task, updated_checked_value)
+
+    with menu_column:
+        render_task_actions_menu(task)
+
+    if st.session_state.get("editing_task_id") == task["id"]:
+        render_task_edit_form(task)
+        return
+
+    render_task_delete_confirmation(task)
+
+    description = task.get("description", "")
+    status = f"Status: {format_task_status(task.get('human_status', 'not_started'))}"
+    description_html = (
+        f"<p style='margin: 0 0 0.25rem 0;'>{html.escape(description)}</p>"
+        if description
+        else ""
+    )
+    st.markdown(
+        f"""
+        <div style="margin-left: 1.9rem;">
+            {description_html}
+            <p style="
+                color: #A0A7B4;
+                font-size: 0.85rem;
+                line-height: 1.3;
+                margin: 0.25rem 0 0.75rem 0;
+            ">
+                {html.escape(status)}
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if st.button(
+        "Generate Plan",
+        key=f"generate_plan_{task['id']}",
+        help=(
+            "Generate Plan uses the current codebase to suggest a goal, subtasks, "
+            "acceptance criteria, and relevant files."
+        ),
+    ):
+        generate_plan_for_task(selected_project, task)
+
+    render_task_plan(selected_project, task)
 
 
 @st.dialog("Add Task")
@@ -1327,11 +1634,9 @@ def render_add_task_dialog(selected_project: dict) -> None:
 
 def render_tasks_section(selected_project: dict) -> None:
     render_workspace_heading("Task Workspace")
-    st.subheader("Tasks")
-    render_muted_helper_text("Create and manage development tasks for this project.")
 
-    if st.button("Add Task"):
-        render_add_task_dialog(selected_project)
+    if TASK_VIEW_KEY not in st.session_state:
+        st.session_state[TASK_VIEW_KEY] = TASK_LIST_VIEW
 
     try:
         tasks = list_task_records_for_project(selected_project["id"])
@@ -1339,7 +1644,29 @@ def render_tasks_section(selected_project: dict) -> None:
         st.error("Tasks could not be loaded. Please try again.")
         return
 
+    if st.session_state.get(TASK_VIEW_KEY) == TASK_DETAIL_VIEW:
+        selected_task_id = st.session_state.get(SELECTED_TASK_ID_KEY)
+        selected_task = next(
+            (task for task in tasks if task["id"] == selected_task_id),
+            None,
+        )
+
+        if selected_task is not None:
+            render_task_detail(selected_project, selected_task)
+            return
+
+        st.session_state[TASK_VIEW_KEY] = TASK_LIST_VIEW
+        st.session_state[SELECTED_TASK_ID_KEY] = None
+
+    st.subheader("Tasks")
+    render_muted_helper_text("Create and manage development tasks for this project.")
+
+    if st.button("Add Task"):
+        render_add_task_dialog(selected_project)
+
     if not tasks:
+        st.session_state[TASK_VIEW_KEY] = TASK_LIST_VIEW
+        st.session_state[SELECTED_TASK_ID_KEY] = None
         st.info(
             "No tasks yet.\n\n"
             "Add a task you want to complete in this codebase. Codebase Compass can "
@@ -1348,7 +1675,7 @@ def render_tasks_section(selected_project: dict) -> None:
         return
 
     for task in tasks:
-        render_task_card(selected_project, task)
+        render_task_list_card(task)
 
 
 def main() -> None:
