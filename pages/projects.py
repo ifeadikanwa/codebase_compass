@@ -43,6 +43,18 @@ def render_muted_meta(text) -> None:
     )
 
 
+def render_project_detail(label: str, value) -> None:
+    safe_label = html.escape(str(label))
+    safe_value = html.escape(str(value or "Unknown"))
+    st.markdown(
+        f"""
+        <p style="margin: 0.75rem 0 0.15rem 0;"><strong>{safe_label}</strong></p>
+        <p style="color: #A0A7B4; margin: 0;">{safe_value}</p>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def initialize_session_state() -> None:
     if "projects" not in st.session_state:
         st.session_state["projects"] = []
@@ -68,6 +80,51 @@ def get_project_task_count(project: dict) -> str:
         return str(len(list_task_records_for_project(project["id"])))
     except Exception:
         return "unavailable"
+
+
+def get_project_file_size(project: dict) -> str:
+    zip_file_size = project.get("zip_file_size")
+    return format_file_size(zip_file_size) if isinstance(zip_file_size, int) else "Unknown"
+
+
+def open_project(project: dict) -> None:
+    st.session_state["selected_project_id"] = project["id"]
+    st.session_state["selected_project_name"] = project["name"]
+    st.switch_page("pages/project_home.py")
+
+
+def render_project_card_title(project: dict) -> None:
+    safe_project_name = html.escape(project.get("name") or "Untitled Project")
+    st.markdown(f"### {safe_project_name}", unsafe_allow_html=True)
+
+
+def render_project_card_summary(project: dict) -> None:
+    description = project.get("description") or "No description provided."
+    task_count = get_project_task_count(project)
+    updated_time = format_relative_time(project.get("updated_at"))
+
+    safe_description = html.escape(description)
+    safe_task_count = html.escape(task_count)
+    safe_updated_time = html.escape(updated_time)
+
+    st.markdown(
+        f"""
+        <div>
+            <p style="margin: 0.35rem 0 0.75rem 0;">
+                {safe_description}
+            </p>
+            <p style="
+                color: #A0A7B4;
+                font-size: 0.85rem;
+                line-height: 1.3;
+                margin: 0.25rem 0 0.75rem 0;
+            ">
+                Tasks: {safe_task_count} &nbsp;•&nbsp; Updated {safe_updated_time}
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def clear_pending_project_delete() -> None:
@@ -187,6 +244,29 @@ def render_project_edit_form(project: dict) -> None:
     st.rerun()
 
 
+def render_project_actions_menu(project: dict) -> None:
+    with st.popover("⋯"):
+        render_project_detail(
+            "Uploaded ZIP",
+            project.get("original_zip_filename") or "Unknown",
+        )
+        render_project_detail("File size", get_project_file_size(project))
+        render_project_detail(
+            "Codebase path",
+            project.get("codebase_path") or "Unknown",
+        )
+
+        if st.button("Edit project", key=f"edit_project_{project['id']}"):
+            st.session_state["editing_project_id"] = project["id"]
+            clear_pending_project_delete()
+            st.rerun()
+
+        if st.button("Delete project", key=f"delete_project_{project['id']}"):
+            st.session_state["pending_delete_project_id"] = project["id"]
+            clear_project_editing()
+            st.rerun()
+
+
 @st.dialog("Create Project")
 def create_project_dialog() -> None:
     with st.form("create_project_form"):
@@ -261,43 +341,23 @@ def render_projects() -> None:
 
     for project in projects:
         with st.container(border=True):
-            st.subheader(project["name"])
+            title_col, open_col, menu_col = st.columns([0.72, 0.14, 0.14])
+
+            with title_col:
+                render_project_card_title(project)
+
+            with open_col:
+                if st.button("Open", key=f"open_project_{project['id']}"):
+                    open_project(project)
+
+            with menu_col:
+                render_project_actions_menu(project)
 
             if st.session_state.get("editing_project_id") == project["id"]:
                 render_project_edit_form(project)
                 continue
 
-            if project["description"]:
-                st.write(project["description"])
-            else:
-                st.write("No description provided.")
-
-            st.write(f"Tasks: {get_project_task_count(project)}")
-            render_muted_meta(
-                f"Last updated: {format_relative_time(project.get('updated_at'))}"
-            )
-            st.write(f"ZIP: {project['original_zip_filename']}")
-            st.write(f"File size: {format_file_size(project['zip_file_size'])}")
-
-            open_column, edit_column, delete_column = st.columns(3)
-
-            with open_column:
-                if st.button("Open Project", key=f"open_project_{project['id']}"):
-                    st.session_state["selected_project_id"] = project["id"]
-                    st.session_state["selected_project_name"] = project["name"]
-                    st.switch_page("pages/project_home.py")
-
-            with edit_column:
-                if st.button("Edit", key=f"edit_project_{project['id']}"):
-                    st.session_state["editing_project_id"] = project["id"]
-                    clear_pending_project_delete()
-                    st.rerun()
-
-            with delete_column:
-                if st.button("Delete", key=f"delete_project_{project['id']}"):
-                    st.session_state["pending_delete_project_id"] = project["id"]
-                    clear_project_editing()
-                    st.rerun()
+            render_project_card_summary(project)
 
             if st.session_state.get("pending_delete_project_id") == project["id"]:
                 st.warning(
