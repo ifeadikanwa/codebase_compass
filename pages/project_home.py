@@ -4,6 +4,8 @@ from pathlib import Path
 
 import streamlit as st
 
+from data.code_chunk_repository import list_project_code_chunks
+from data.database import DEFAULT_DB_PATH
 from data.project_ai_output_repository import (
     CODEBASE_OVERVIEW_OUTPUT_TYPE,
     get_project_ai_output,
@@ -31,6 +33,10 @@ from services.task_service import (
     apply_task_plan_to_task,
     create_task,
     set_subtask_completion,
+)
+from services.vector_search_service import (
+    build_project_vector_index,
+    search_project_vectors,
 )
 from utils.file_reader import read_code_file
 from utils.file_scanner import scan_supported_files
@@ -509,9 +515,36 @@ def render_search_result(result: dict) -> None:
         st.subheader(
             f"{result['file_path']} - Lines {result['start_line']}-{result['end_line']}"
         )
-        st.write(f"Matching terms: {', '.join(result['matching_terms'])}")
+        matching_terms = result.get("matching_terms")
+        if matching_terms:
+            st.write(f"Matching terms: {', '.join(matching_terms)}")
         st.write(f"Score: {result['score']}")
         render_code_content(result["file_path"], result["content"])
+
+
+def run_keyword_codebase_search(codebase_path: str, query: str) -> list[dict] | None:
+    try:
+        return search_codebase(codebase_path, query, top_k=5)
+    except RuntimeError as error:
+        st.error(f"Could not search codebase: {error}")
+        return None
+    except ValueError as error:
+        st.error(f"Could not search codebase: {error}")
+        return None
+
+
+def render_semantic_index_status(project_id: str, chunk_count: int | None = None) -> None:
+    if chunk_count is None:
+        try:
+            chunk_count = len(list_project_code_chunks(project_id, db_path=DEFAULT_DB_PATH))
+        except Exception:
+            render_muted_meta("Semantic index: Unknown")
+            return
+
+    if chunk_count > 0:
+        render_muted_meta(f"Semantic index: Built • {chunk_count} chunks")
+    else:
+        render_muted_meta("Semantic index: Not built")
 
 
 def render_codebase_search(selected_project: dict) -> None:
@@ -526,6 +559,29 @@ def render_codebase_search(selected_project: dict) -> None:
     if not codebase_path:
         st.error("This project does not have a valid extracted codebase path.")
         return
+
+    indexed_chunk_count = None
+
+    if st.button("Build/Rebuild semantic search index"):
+        try:
+            with st.spinner("Building semantic search index..."):
+                summary = build_project_vector_index(
+                    selected_project["id"],
+                    codebase_path,
+                    db_path=DEFAULT_DB_PATH,
+                )
+        except Exception:
+            st.error(
+                "The semantic search index could not be built. Please check your API key or try again."
+            )
+        else:
+            st.success(
+                "Semantic search index rebuilt: "
+                f"{summary['files_indexed']} files, {summary['chunks_indexed']} chunks indexed."
+            )
+            indexed_chunk_count = summary["chunks_indexed"]
+
+    render_semantic_index_status(selected_project["id"], chunk_count=indexed_chunk_count)
 
     with st.form("search_codebase_form"):
         query = st.text_input(
@@ -544,22 +600,46 @@ def render_codebase_search(selected_project: dict) -> None:
         st.warning("Enter a search query.")
         return
 
+    retrieval_mode = "Using semantic search"
+
     try:
-        results = search_codebase(codebase_path, cleaned_query, top_k=5)
+        results = search_project_vectors(
+            selected_project["id"],
+            cleaned_query,
+            top_k=5,
+            db_path=DEFAULT_DB_PATH,
+        )
     except RuntimeError as error:
-        st.error(f"Could not search codebase: {error}")
-        return
-    except ValueError as error:
-        st.error(f"Could not search codebase: {error}")
+        error_message = str(error)
+        if "OPENAI_API_KEY" in error_message:
+            st.warning(
+                "Semantic search needs an OpenAI API key. Keyword search fallback was used."
+            )
+        else:
+            st.warning("Semantic search could not be used. Keyword search fallback was used.")
+
+        retrieval_mode = "Using keyword search fallback"
+        results = run_keyword_codebase_search(codebase_path, cleaned_query)
+    except Exception:
+        st.warning("Semantic search could not be used. Keyword search fallback was used.")
+        retrieval_mode = "Using keyword search fallback"
+        results = run_keyword_codebase_search(codebase_path, cleaned_query)
+    else:
+        if not results:
+            retrieval_mode = "Using keyword search fallback"
+            results = run_keyword_codebase_search(codebase_path, cleaned_query)
+
+    if results is None:
         return
 
     if not results:
         st.info(
-            "No relevant code sections found.\n\n"
-            "Try using a filename, function name, class name, or more specific feature description."
+            "I can only answer questions about this project’s codebase. "
+            "I couldn’t find relevant code context for that question."
         )
         return
 
+    st.caption(retrieval_mode)
     st.subheader("AI Answer")
 
     try:

@@ -111,8 +111,11 @@ def test_build_codebase_prompt_includes_grounding_instructions():
     prompt_lower = prompt.lower()
 
     assert "using only the supplied code context" in prompt_lower
+    assert "do not answer from general knowledge" in prompt_lower
+    assert "question is unrelated to the codebase" in prompt_lower
     assert "do not invent" in prompt_lower
-    assert "context is insufficient" in prompt_lower
+    assert "files, functions, classes" in prompt_lower
+    assert "available code context does not contain enough information" in prompt_lower
     assert "file paths and line ranges" in prompt_lower
 
 
