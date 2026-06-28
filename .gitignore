@@ -11,6 +11,5 @@ htmlcov/
 .env.*
 !.env.example
 *.egg-info/
-storage/projects/
-.vscode
 storage/
+.vscode
